@@ -1,6 +1,11 @@
 {
   "include": ["**/*.ts", "**/*.tsx"],
   "compilerOptions": {
+    "plugins": [
+      {
+        "name": "@effect/language-service"
+      }
+    ],
     "strict": true,
     "esModuleInterop": true,
     "jsx": "react-jsx",

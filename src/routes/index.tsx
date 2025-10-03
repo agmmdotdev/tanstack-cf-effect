@@ -49,15 +49,15 @@ const getData = createServerFn().handler(async () => {
   const program = Effect.fn("hey this")(function* (hello: string) {
     yield* Effect.annotateCurrentSpan("user_id", "123");
     yield* Effect.log("hello this is log");
-
+    const a = yield* Effect.tryPromise(() => env.CHECKOUT_WORKFLOW.create());
     if (Math.random() > 0.5) {
       return yield* Effect.fail(new Error("hello this is error"));
     }
     // List users within a span
     return "hello world";
   })("hello world").pipe(
-    Effect.catchAll((e) => Effect.logError(e)),
-    Effect.scoped
+    Effect.scoped,
+    Effect.catchAll((e) => Effect.logError(e))
   );
 
   const a = program.pipe(

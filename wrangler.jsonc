@@ -5,7 +5,13 @@
   "compatibility_flags": ["nodejs_compat"],
   "main": "@tanstack/react-start/server-entry",
   "observability": {"enabled": true},
-  
+   "workflows": [
+    {
+      "name": "checkout-workflow",
+      "binding": "CHECKOUT_WORKFLOW",
+      "class_name": "CheckoutWorkflow"
+    }
+  ],
   "vars": {
     "MY_VAR": "Hello from Cloudflare",
   },

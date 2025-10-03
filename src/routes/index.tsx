@@ -1,6 +1,7 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, notFound } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
 import { env } from "cloudflare:workers";
+import { useEffect, useState } from "react";
 import {
   Chunk,
   Effect,
@@ -22,7 +23,12 @@ export const Route = createFileRoute("/")({
   loader: () => getData(),
   component: Home,
 });
-
+const checkStatus = createServerFn()
+  .inputValidator((id: string) => id)
+  .handler(async ({ data: id }) => {
+    const a = await env.CHECKOUT_WORKFLOW.get(id);
+    return await a.status();
+  });
 const getData = createServerFn().handler(async () => {
   // client.ts
 
@@ -46,42 +52,61 @@ const getData = createServerFn().handler(async () => {
 
   // Use the in-memory store
   class MyError extends Error {}
-  const program = Effect.fn("hey this")(function* (hello: string) {
+  const program = Effect.fn("hey this")(function* () {
     yield* Effect.annotateCurrentSpan("user_id", "123");
     yield* Effect.log("hello this is log");
     const a = yield* Effect.tryPromise(() => env.CHECKOUT_WORKFLOW.create());
-    if (Math.random() > 0.5) {
-      return yield* Effect.fail(new Error("hello this is error"));
-    }
-    // List users within a span
-    return "hello world";
-  })("hello world").pipe(
+    const id = yield* Effect.sync(() => a.id);
+    return id;
+  })().pipe(
     Effect.scoped,
-    Effect.catchAll((e) => Effect.logError(e))
+    Effect.catchAll((e) => Effect.succeed({ error: e }))
   );
-
   const a = program.pipe(
     Effect.provide(Layer.mergeAll(WebSdkLive)),
     Effect.runPromise
   );
   const b = await a;
 
-  return {
-    message: `Running in ${navigator.userAgent}`,
-    myVar: env.MY_VAR,
-    result: b,
-  };
+  if (typeof b === "string") {
+    return b;
+  }
+  throw notFound();
 });
 
 function Home() {
   const data = Route.useLoaderData();
+  const [status, setStatus] = useState<string>("");
+
+  useEffect(() => {
+    console.log(data);
+
+    // Set up interval to check status every 2 seconds
+    const interval = setInterval(async () => {
+      if (data && typeof data === "string") {
+        try {
+          const currentStatus = await checkStatus({ data });
+          setStatus(currentStatus.status);
+          console.log("Status:", currentStatus);
+        } catch (error) {
+          console.error("Error checking status:", error);
+        }
+      }
+    }, 2000);
+
+    // Cleanup interval on component unmount or data change
+    return () => clearInterval(interval);
+  }, [data]);
 
   return (
     <div className="p-2">
       <h3>Welcome Home!!!</h3>
-      <p>{data.message}</p>
-      <p>{data.myVar}</p>
-      <p>{data.result?.toString()}</p>
+      {data && typeof data === "string" && (
+        <div>
+          <p>Workflow ID: {data}</p>
+          {status !== null && <p>Status: {String(status)}</p>}
+        </div>
+      )}
     </div>
   );
 }

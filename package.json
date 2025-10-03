@@ -1,0 +1,48 @@
+{
+  "name": "tanstack-start-example-basic-cloudflare",
+  "private": true,
+  "sideEffects": false,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build && tsc --noEmit",
+    "preview": "vite preview",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types",
+    "postinstall": "npm run cf-typegen"
+  },
+  "dependencies": {
+    "@effect/experimental": "^0.56.0",
+    "@effect/opentelemetry": "^0.58.0",
+    "@effect/platform": "^0.92.1",
+    "@effect/platform-node": "^0.98.2",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-logs": "^0.205.0",
+    "@opentelemetry/sdk-metrics": "^2.1.0",
+    "@opentelemetry/sdk-trace-base": "^2.1.0",
+    "@opentelemetry/sdk-trace-node": "^2.1.0",
+    "@opentelemetry/sdk-trace-web": "^2.1.0",
+    "@tanstack/react-router": "^1.132.31",
+    "@tanstack/react-router-devtools": "^1.132.31",
+    "@tanstack/react-start": "^1.132.32",
+    "effect": "^3.18.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.13.7",
+    "@effect/language-service": "^0.41.1",
+    "@types/node": "^22.5.4",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.6.0",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.5.1",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.2",
+    "vite": "^7.1.7",
+    "vite-tsconfig-paths": "^5.1.4",
+    "wrangler": "^4.40.2"
+  },
+  "packageManager": "yarn@4.10.3"
+}

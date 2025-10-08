@@ -590,7 +590,7 @@ export const Route = createFileRoute("/api/ddg")({
               usedUrls.push(s.url);
             }
 
-            const response = await ai.models.generateContentStream({
+            const nonStreaming = await ai.models.generateContent({
               model,
               contents: [
                 {
@@ -609,13 +609,10 @@ export const Route = createFileRoute("/api/ddg")({
                 },
               ],
             });
-
-            const parts: string[] = [];
-            for await (const chunk of response) {
-              const t = (chunk as { text?: string }).text;
-              if (typeof t === "string" && t.length > 0) parts.push(t);
-            }
-            const summary = parts.join("").trim();
+            const summary =
+              typeof nonStreaming.text === "string"
+                ? nonStreaming.text.trim()
+                : "";
             if (summary.length > 0) {
               const sourcesBlock =
                 successes.length > 0
@@ -628,8 +625,9 @@ export const Route = createFileRoute("/api/ddg")({
                 headers: { "content-type": "text/plain; charset=utf-8" },
               });
             }
-          } catch {
+          } catch (e) {
             // Fall through to return HTML if summarization fails
+            console.log(e);
           }
 
           return new Response(html, {

@@ -241,21 +241,62 @@ export const Route = createFileRoute("/api/ddg")({
 
         let successes: Array<{ url: string; html: string }> = [];
 
-        const browser = await puppeteer.launch(env.MYBROWSER);
+        let browser;
         try {
-          const page = await browser.newPage();
+          browser = await puppeteer.launch(env.MYBROWSER);
+        } catch (e) {
+          console.error(
+            "[ddg] browser_launch_failed",
+            (e as Error).message ?? e
+          );
+          return new Response(
+            "Failed to launch browser: " + ((e as Error).message ?? String(e)),
+            {
+              status: 500,
+              headers: { "content-type": "text/plain; charset=utf-8" },
+            }
+          );
+        }
+
+        try {
+          let page;
+          try {
+            page = await browser.newPage();
+          } catch (e) {
+            console.error(
+              "[ddg] page_creation_failed",
+              (e as Error).message ?? e
+            );
+            throw new Error(
+              "Failed to create new page: " +
+                ((e as Error).message ?? String(e))
+            );
+          }
+
           const chosenUserAgent = pickRandom(USER_AGENT_LIST);
           const chosenLocale = pickRandom(LOCALES);
           const chosenTimezone = pickRandom(TIMEZONES);
           const chosenViewport = pickRandom(VIEWPORTS);
 
           // Try to look more like a regular browser to avoid bot checks
-          await applyPageStealth(page, {
-            userAgent: chosenUserAgent,
-            locale: chosenLocale,
-            timezone: chosenTimezone,
-            viewport: chosenViewport,
-          });
+          try {
+            await applyPageStealth(page, {
+              userAgent: chosenUserAgent,
+              locale: chosenLocale,
+              timezone: chosenTimezone,
+              viewport: chosenViewport,
+            });
+          } catch (e) {
+            console.error(
+              "[ddg] stealth_setup_failed",
+              (e as Error).message ?? e
+            );
+            throw new Error(
+              "Failed to apply stealth settings: " +
+                ((e as Error).message ?? String(e))
+            );
+          }
+
           await page.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
           await page.setDefaultTimeout(OP_TIMEOUT_MS);
 
@@ -266,52 +307,87 @@ export const Route = createFileRoute("/api/ddg")({
 
           // Small random delay before navigation
           await sleep(randomInt(100, 400));
-          await page.goto(searchUrl, {
-            waitUntil: "domcontentloaded",
-            timeout: NAV_TIMEOUT_MS,
-            referer: "https://duckduckgo.com/",
-          });
-          const serpHtml = await withTimeout(
-            page.content(),
-            OP_TIMEOUT_MS,
-            "serp_content"
-          );
-          console.log("serpHtml", serpHtml);
+
+          let serpHtml: string;
+          try {
+            await page.goto(searchUrl, {
+              waitUntil: "domcontentloaded",
+              timeout: NAV_TIMEOUT_MS,
+              referer: "https://duckduckgo.com/",
+            });
+            serpHtml = await withTimeout(
+              page.content(),
+              OP_TIMEOUT_MS,
+              "serp_content"
+            );
+            console.log(
+              "[ddg] serp_loaded successfully",
+              serpHtml.length,
+              "chars"
+            );
+          } catch (e) {
+            console.error(
+              "[ddg] serp_navigation_failed",
+              searchUrl,
+              (e as Error).message ?? e
+            );
+            throw new Error(
+              "Failed to load search results: " +
+                ((e as Error).message ?? String(e))
+            );
+          }
           // Prefer static DOM parsing over waiting for a selector to avoid timeouts
           // Collect multiple candidate result links (excluding obvious ads)
-          const rawResults = (await withTimeout(
-            page.evaluate(() => {
-              function resolveHref(anchor: HTMLAnchorElement): string | null {
-                return anchor.href || anchor.getAttribute("href") || null;
-              }
-              function isAd(anchor: HTMLAnchorElement): boolean {
-                return anchor.closest(".result--ad") !== null;
-              }
-              const selectors: ReadonlyArray<string> = [
-                "a.result__a",
-                "a.result__url",
-                "a.result__title",
-                'a[rel="nofollow noopener"][href]',
-              ];
-              const seen = new Set<string>();
-              const results: Array<{ href: string; isAd: boolean }> = [];
-              for (const sel of selectors) {
-                const anchors = Array.from(
-                  document.querySelectorAll<HTMLAnchorElement>(sel)
-                );
-                for (const a of anchors) {
-                  const href = resolveHref(a);
-                  if (!href) continue;
-                  if (seen.has(href)) continue;
-                  seen.add(href);
-                  results.push({ href, isAd: isAd(a) });
+          let rawResults: Array<{ href: string; isAd: boolean }>;
+          try {
+            rawResults = (await withTimeout(
+              page.evaluate(() => {
+                function resolveHref(anchor: HTMLAnchorElement): string | null {
+                  return anchor.href || anchor.getAttribute("href") || null;
                 }
-              }
-              return results;
-            }),
-            OP_TIMEOUT_MS,
-            "serp_evaluate"
-          )) as Array<{ href: string; isAd: boolean }>;
+                function isAd(anchor: HTMLAnchorElement): boolean {
+                  return anchor.closest(".result--ad") !== null;
+                }
+                const selectors: ReadonlyArray<string> = [
+                  "a.result__a",
+                  "a.result__url",
+                  "a.result__title",
+                  'a[rel="nofollow noopener"][href]',
+                ];
+                const seen = new Set<string>();
+                const results: Array<{ href: string; isAd: boolean }> = [];
+                for (const sel of selectors) {
+                  const anchors = Array.from(
+                    document.querySelectorAll<HTMLAnchorElement>(sel)
+                  );
+                  for (const a of anchors) {
+                    const href = resolveHref(a);
+                    if (!href) continue;
+                    if (seen.has(href)) continue;
+                    seen.add(href);
+                    results.push({ href, isAd: isAd(a) });
+                  }
+                }
+                return results;
+              }),
+              OP_TIMEOUT_MS,
+              "serp_evaluate"
+            )) as Array<{ href: string; isAd: boolean }>;
+            console.log(
+              "[ddg] serp_evaluation_success",
+              rawResults.length,
+              "raw results found"
+            );
+          } catch (e) {
+            console.error(
+              "[ddg] serp_evaluation_failed",
+              (e as Error).message ?? e
+            );
+            throw new Error(
+              "Failed to extract search results: " +
+                ((e as Error).message ?? String(e))
+            );
+          }
 
           const normalizeDuckHref = (inputHref: string): string => {
             let candidate = inputHref;
@@ -337,7 +413,7 @@ export const Route = createFileRoute("/api/ddg")({
             }
             return candidate;
           };
-          console.log("rawResults", rawResults);
+          console.log("[ddg] rawResults", rawResults.length, "total results");
           const preferredCandidates: string[] = Array.from(
             new Set(
               rawResults
@@ -349,8 +425,17 @@ export const Route = createFileRoute("/api/ddg")({
           );
 
           if (preferredCandidates.length === 0) {
+            console.error(
+              "[ddg] no_valid_candidates_found",
+              "raw results:",
+              rawResults.length
+            );
             throw new Error("Failed to locate any non-ad search result links");
           }
+          console.log(
+            "[ddg] preferred_candidates_count",
+            preferredCandidates.length
+          );
 
           let html: string | null = null;
           let successUrl: string | null = null;
@@ -370,25 +455,56 @@ export const Route = createFileRoute("/api/ddg")({
             const worker = async (
               candidateUrl: string
             ): Promise<string | null> => {
-              const p = await browser.newPage();
+              let p;
+              try {
+                p = await browser.newPage();
+              } catch (e) {
+                console.error(
+                  "[ddg] candidate_page_creation_failed",
+                  candidateUrl,
+                  (e as Error).message ?? e
+                );
+                return null;
+              }
               try {
                 console.log("[ddg] visiting", candidateUrl);
                 visitedCount += 1;
-                await applyPageStealth(p, {
-                  userAgent: chosenUserAgent,
-                  locale: chosenLocale,
-                  timezone: chosenTimezone,
-                  viewport: chosenViewport,
-                });
+
+                try {
+                  await applyPageStealth(p, {
+                    userAgent: chosenUserAgent,
+                    locale: chosenLocale,
+                    timezone: chosenTimezone,
+                    viewport: chosenViewport,
+                  });
+                } catch (e) {
+                  console.error(
+                    "[ddg] candidate_stealth_setup_failed",
+                    candidateUrl,
+                    (e as Error).message ?? e
+                  );
+                  throw e;
+                }
+
                 await p.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
                 await p.setDefaultTimeout(OP_TIMEOUT_MS);
 
                 await sleep(randomInt(120, 500));
-                await p.goto(candidateUrl, {
-                  waitUntil: "domcontentloaded",
-                  timeout: NAV_TIMEOUT_MS,
-                  referer: searchUrl,
-                });
+
+                try {
+                  await p.goto(candidateUrl, {
+                    waitUntil: "domcontentloaded",
+                    timeout: NAV_TIMEOUT_MS,
+                    referer: searchUrl,
+                  });
+                } catch (e) {
+                  console.error(
+                    "[ddg] candidate_navigation_failed",
+                    candidateUrl,
+                    (e as Error).message ?? e
+                  );
+                  throw e;
+                }
 
                 // Some pages perform an immediate client-side redirect after DOMContentLoaded.
                 await Promise.race([
@@ -397,7 +513,10 @@ export const Route = createFileRoute("/api/ddg")({
                       waitUntil: "domcontentloaded",
                       timeout: 1500,
                     })
-                    .catch(() => null),
+                    .catch((e) => {
+                      console.log("[ddg] no_redirect_detected", candidateUrl);
+                      return null;
+                    }),
                   sleep(300),
                 ]);
 
@@ -418,12 +537,33 @@ export const Route = createFileRoute("/api/ddg")({
                       if (
                         !err.message.includes("Execution context was destroyed")
                       ) {
+                        console.error(
+                          "[ddg] content_read_failed",
+                          candidateUrl,
+                          "attempt:",
+                          attempt,
+                          err.message
+                        );
                         throw err;
                       }
+                      console.warn(
+                        "[ddg] content_read_retry",
+                        candidateUrl,
+                        "attempt:",
+                        attempt,
+                        "context destroyed"
+                      );
                       await sleep(300);
                     }
                   }
-                  if (lastError) throw lastError;
+                  if (lastError) {
+                    console.error(
+                      "[ddg] content_read_all_attempts_failed",
+                      candidateUrl,
+                      lastError.message
+                    );
+                    throw lastError;
+                  }
                   return await withTimeout(
                     p.content(),
                     OP_TIMEOUT_MS,
@@ -431,7 +571,23 @@ export const Route = createFileRoute("/api/ddg")({
                   );
                 };
 
-                const candidateHtml = await readContentWithRetry(3);
+                let candidateHtml: string;
+                try {
+                  candidateHtml = await readContentWithRetry(3);
+                  console.log(
+                    "[ddg] content_read_success",
+                    candidateUrl,
+                    "length:",
+                    candidateHtml.length
+                  );
+                } catch (e) {
+                  console.error(
+                    "[ddg] content_read_final_failure",
+                    candidateUrl,
+                    (e as Error).message ?? e
+                  );
+                  throw e;
+                }
 
                 // Skip pages that are likely Cloudflare challenges or parked/ads
                 const looksLikeParkedOrAd =
@@ -465,7 +621,12 @@ export const Route = createFileRoute("/api/ddg")({
                   if (article && article.content && article.title) {
                     if (!successUrl) successUrl = candidateUrl;
                     successCount += 1;
-                    console.log("[ddg] success_readability", candidateUrl);
+                    console.log(
+                      "[ddg] success_readability",
+                      candidateUrl,
+                      "content_length:",
+                      article.content.length
+                    );
                     const wrapped = wrapAsHtmlDocument({
                       title: article.title,
                       content: article.content,
@@ -477,22 +638,43 @@ export const Route = createFileRoute("/api/ddg")({
                     successes.push({ url: candidateUrl, html: wrapped });
                     return wrapped;
                   }
+                  console.log(
+                    "[ddg] readability_no_article",
+                    candidateUrl,
+                    "falling back to raw HTML"
+                  );
                   if (!successUrl) successUrl = candidateUrl;
                   successCount += 1;
-                  console.log("[ddg] success_raw", candidateUrl);
+                  console.log(
+                    "[ddg] success_raw",
+                    candidateUrl,
+                    "html_length:",
+                    candidateHtml.length
+                  );
                   successes.push({ url: candidateUrl, html: candidateHtml });
                   return candidateHtml;
-                } catch {
+                } catch (e) {
+                  console.warn(
+                    "[ddg] readability_parse_error",
+                    candidateUrl,
+                    (e as Error).message ?? e,
+                    "using raw HTML"
+                  );
                   if (!successUrl) successUrl = candidateUrl;
                   successCount += 1;
-                  console.log("[ddg] success_raw_fallback", candidateUrl);
+                  console.log(
+                    "[ddg] success_raw_fallback",
+                    candidateUrl,
+                    "html_length:",
+                    candidateHtml.length
+                  );
                   successes.push({ url: candidateUrl, html: candidateHtml });
                   return candidateHtml;
                 }
               } catch (e) {
                 skippedCount += 1;
-                console.log(
-                  "[ddg] error",
+                console.error(
+                  "[ddg] candidate_worker_error",
                   candidateUrl,
                   (e as Error).message ?? e
                 );
@@ -500,8 +682,12 @@ export const Route = createFileRoute("/api/ddg")({
               } finally {
                 try {
                   await withTimeout(p.close(), 2_000, "page_close");
-                } catch {
-                  // ignore
+                } catch (e) {
+                  console.warn(
+                    "[ddg] candidate_page_close_error",
+                    candidateUrl,
+                    (e as Error).message ?? e
+                  );
                 }
               }
             };
@@ -524,17 +710,37 @@ export const Route = createFileRoute("/api/ddg")({
                 "successes=",
                 successCount
               );
+            } else {
+              console.warn(
+                "[ddg] no_successful_candidate",
+                "visited=",
+                visitedCount,
+                "skipped=",
+                skippedCount,
+                "successes=",
+                successCount
+              );
             }
           }
 
           if (!html) {
             // Fall back to returning the SERP HTML so the caller can inspect
             // what was found; avoids returning an empty stub page from a parked domain
+            console.warn(
+              "[ddg] falling_back_to_serp_html",
+              "serp_length:",
+              serpHtml.length
+            );
             html = serpHtml;
           }
 
           // Summarize with Gemini using multiple sources when available
           try {
+            console.log(
+              "[ddg] starting_ai_summarization",
+              "successes:",
+              successes.length
+            );
             const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
             const model = "gemini-flash-lite-latest";
 
@@ -554,7 +760,10 @@ export const Route = createFileRoute("/api/ddg")({
                   document.textContent ??
                   ""
                 ).trim();
-                if (!rawText) continue;
+                if (!rawText) {
+                  console.warn("[ddg] source_has_no_text", s.url);
+                  continue;
+                }
                 const snippet =
                   `${title ? `Title: ${title}\n\n` : ""}${rawText}`.slice(
                     0,
@@ -580,6 +789,12 @@ export const Route = createFileRoute("/api/ddg")({
               sourceTexts.push({ url: successUrl ?? "unknown", text: snippet });
             }
 
+            console.log(
+              "[ddg] ai_source_texts_prepared",
+              sourceTexts.length,
+              "sources"
+            );
+
             // Combine with overall cap
             let combined = "";
             const usedUrls: string[] = [];
@@ -590,7 +805,15 @@ export const Route = createFileRoute("/api/ddg")({
               usedUrls.push(s.url);
             }
 
-            const nonStreaming = await ai.models.generateContent({
+            console.log(
+              "[ddg] ai_combined_input_size",
+              combined.length,
+              "chars",
+              "urls:",
+              usedUrls.length
+            );
+
+            const response = await ai.models.generateContent({
               model,
               contents: [
                 {
@@ -609,10 +832,13 @@ export const Route = createFileRoute("/api/ddg")({
                 },
               ],
             });
-            const summary =
-              typeof nonStreaming.text === "string"
-                ? nonStreaming.text.trim()
-                : "";
+
+            const summary = (response.text ?? "").trim();
+            console.log(
+              "[ddg] ai_response_received",
+              "summary_length:",
+              summary.length
+            );
             if (summary.length > 0) {
               const sourcesBlock =
                 successes.length > 0
@@ -621,31 +847,54 @@ export const Route = createFileRoute("/api/ddg")({
                   : successUrl
                     ? `\n\nSource: ${successUrl}`
                     : "";
+              console.log("[ddg] returning_ai_summary");
               return new Response(summary + sourcesBlock, {
                 headers: { "content-type": "text/plain; charset=utf-8" },
               });
+            } else {
+              console.warn("[ddg] ai_returned_empty_summary");
             }
           } catch (e) {
             // Fall through to return HTML if summarization fails
-            console.log(e);
+            console.error(
+              "[ddg] ai_summarization_failed",
+              (e as Error).message ?? e,
+              "stack:",
+              (e as Error).stack
+            );
           }
 
+          console.log("[ddg] returning_html_response", "length:", html.length);
           return new Response(html, {
             headers: {
               "content-type": "text/html; charset=utf-8",
             },
           });
+        } catch (e) {
+          console.error(
+            "[ddg] request_handler_error",
+            (e as Error).message ?? e,
+            "stack:",
+            (e as Error).stack
+          );
+          return new Response(
+            "Search failed: " + ((e as Error).message ?? String(e)),
+            {
+              status: 500,
+              headers: { "content-type": "text/plain; charset=utf-8" },
+            }
+          );
         } finally {
           try {
             // Report how many pages yielded usable content
-            try {
-              console.log("[ddg] total_success_pages", successes.length);
-            } catch {
-              // ignore logging errors
-            }
+            console.log("[ddg] total_success_pages", successes.length);
             await withTimeout(browser.close(), 10000, "browser_close");
-          } catch {
-            // ignore
+            console.log("[ddg] browser_closed_successfully");
+          } catch (e) {
+            console.error(
+              "[ddg] browser_close_error",
+              (e as Error).message ?? e
+            );
           }
         }
       },

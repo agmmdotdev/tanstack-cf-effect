@@ -17,6 +17,8 @@
     "@effect/opentelemetry": "^0.58.0",
     "@effect/platform": "^0.92.1",
     "@effect/platform-node": "^0.98.2",
+    "@google/genai": "^1.22.0",
+    "@mozilla/readability": "^0.6.0",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/sdk-logs": "^0.205.0",
     "@opentelemetry/sdk-metrics": "^2.1.0",
@@ -27,6 +29,7 @@
     "@tanstack/react-router-devtools": "^1.132.31",
     "@tanstack/react-start": "^1.132.32",
     "effect": "^3.18.1",
+    "linkedom": "^0.18.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

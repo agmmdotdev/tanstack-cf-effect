@@ -17,5 +17,6 @@
   ],
   "vars": {
     "MY_VAR": "Hello from Cloudflare",
+    "GEMINI_API_KEY": "<set-in-prod-or-use-secret>"
   },
 }

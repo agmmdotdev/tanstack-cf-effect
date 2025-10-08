@@ -21,7 +21,7 @@ import { Route as PostsIndexRouteImport } from './routes/posts.index'
 import { Route as UsersUserIdRouteImport } from './routes/users.$userId'
 import { Route as PostsPostIdRouteImport } from './routes/posts.$postId'
 import { Route as ApiUsersRouteImport } from './routes/api/users'
-import { Route as ApiBrowserTestRouteImport } from './routes/api/browser-test'
+import { Route as ApiDdgRouteImport } from './routes/api/ddg'
 import { Route as PathlessLayoutNestedLayoutRouteImport } from './routes/_pathlessLayout/_nested-layout'
 import { Route as PostsPostIdDeepRouteImport } from './routes/posts_.$postId.deep'
 import { Route as ApiUsersUserIdRouteImport } from './routes/api/users.$userId'
@@ -87,9 +87,9 @@ const ApiUsersRoute = ApiUsersRouteImport.update({
   path: '/api/users',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ApiBrowserTestRoute = ApiBrowserTestRouteImport.update({
-  id: '/api/browser-test',
-  path: '/api/browser-test',
+const ApiDdgRoute = ApiDdgRouteImport.update({
+  id: '/api/ddg',
+  path: '/api/ddg',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PathlessLayoutNestedLayoutRoute =
@@ -127,7 +127,7 @@ export interface FileRoutesByFullPath {
   '/posts': typeof PostsRouteWithChildren
   '/redirect': typeof RedirectRoute
   '/users': typeof UsersRouteWithChildren
-  '/api/browser-test': typeof ApiBrowserTestRoute
+  '/api/ddg': typeof ApiDdgRoute
   '/api/users': typeof ApiUsersRouteWithChildren
   '/posts/$postId': typeof PostsPostIdRoute
   '/users/$userId': typeof UsersUserIdRoute
@@ -143,7 +143,7 @@ export interface FileRoutesByTo {
   '/customScript.js': typeof CustomScriptDotjsRoute
   '/deferred': typeof DeferredRoute
   '/redirect': typeof RedirectRoute
-  '/api/browser-test': typeof ApiBrowserTestRoute
+  '/api/ddg': typeof ApiDdgRoute
   '/api/users': typeof ApiUsersRouteWithChildren
   '/posts/$postId': typeof PostsPostIdRoute
   '/users/$userId': typeof UsersUserIdRoute
@@ -164,7 +164,7 @@ export interface FileRoutesById {
   '/redirect': typeof RedirectRoute
   '/users': typeof UsersRouteWithChildren
   '/_pathlessLayout/_nested-layout': typeof PathlessLayoutNestedLayoutRouteWithChildren
-  '/api/browser-test': typeof ApiBrowserTestRoute
+  '/api/ddg': typeof ApiDdgRoute
   '/api/users': typeof ApiUsersRouteWithChildren
   '/posts/$postId': typeof PostsPostIdRoute
   '/users/$userId': typeof UsersUserIdRoute
@@ -184,7 +184,7 @@ export interface FileRouteTypes {
     | '/posts'
     | '/redirect'
     | '/users'
-    | '/api/browser-test'
+    | '/api/ddg'
     | '/api/users'
     | '/posts/$postId'
     | '/users/$userId'
@@ -200,7 +200,7 @@ export interface FileRouteTypes {
     | '/customScript.js'
     | '/deferred'
     | '/redirect'
-    | '/api/browser-test'
+    | '/api/ddg'
     | '/api/users'
     | '/posts/$postId'
     | '/users/$userId'
@@ -220,7 +220,7 @@ export interface FileRouteTypes {
     | '/redirect'
     | '/users'
     | '/_pathlessLayout/_nested-layout'
-    | '/api/browser-test'
+    | '/api/ddg'
     | '/api/users'
     | '/posts/$postId'
     | '/users/$userId'
@@ -240,7 +240,7 @@ export interface RootRouteChildren {
   PostsRoute: typeof PostsRouteWithChildren
   RedirectRoute: typeof RedirectRoute
   UsersRoute: typeof UsersRouteWithChildren
-  ApiBrowserTestRoute: typeof ApiBrowserTestRoute
+  ApiDdgRoute: typeof ApiDdgRoute
   ApiUsersRoute: typeof ApiUsersRouteWithChildren
   PostsPostIdDeepRoute: typeof PostsPostIdDeepRoute
 }
@@ -331,11 +331,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiUsersRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/browser-test': {
-      id: '/api/browser-test'
-      path: '/api/browser-test'
-      fullPath: '/api/browser-test'
-      preLoaderRoute: typeof ApiBrowserTestRouteImport
+    '/api/ddg': {
+      id: '/api/ddg'
+      path: '/api/ddg'
+      fullPath: '/api/ddg'
+      preLoaderRoute: typeof ApiDdgRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_pathlessLayout/_nested-layout': {
@@ -450,7 +450,7 @@ const rootRouteChildren: RootRouteChildren = {
   PostsRoute: PostsRouteWithChildren,
   RedirectRoute: RedirectRoute,
   UsersRoute: UsersRouteWithChildren,
-  ApiBrowserTestRoute: ApiBrowserTestRoute,
+  ApiDdgRoute: ApiDdgRoute,
   ApiUsersRoute: ApiUsersRouteWithChildren,
   PostsPostIdDeepRoute: PostsPostIdDeepRoute,
 }

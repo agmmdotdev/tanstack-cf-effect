@@ -12,22 +12,19 @@ export const Route = createFileRoute("/api/browser-test")({
 
           const query = "sora2 pricing";
           const searchUrl =
-            "https://www.google.com/search?q=" +
-            encodeURIComponent(query) +
-            "&hl=en&gl=us&pws=0&nfpr=1";
+            "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
 
           await page.goto(searchUrl, { waitUntil: "domcontentloaded" });
 
-          // Prefer result anchors that contain an <h3> (standard Google SERP results)
-          await page.waitForSelector("div#search a:has(h3)", {
+          // DuckDuckGo HTML results anchors
+          await page.waitForSelector("a.result__a", {
             timeout: 10000,
           });
 
           const firstResultHref = (await page.evaluate(() => {
-            const anchor = document.querySelector<HTMLAnchorElement>(
-              "div#search a:has(h3)"
-            );
-            return anchor?.getAttribute("href") ?? null;
+            const anchor =
+              document.querySelector<HTMLAnchorElement>("a.result__a");
+            return anchor?.href ?? anchor?.getAttribute("href") ?? null;
           })) as string | null;
 
           if (!firstResultHref) {
@@ -35,20 +32,26 @@ export const Route = createFileRoute("/api/browser-test")({
           }
 
           let targetUrl: string = firstResultHref;
-          // Google often wraps results like /url?q=<target>&...
-          if (firstResultHref.startsWith("/url?")) {
-            const urlObj = new URL(firstResultHref, "https://www.google.com");
-            const q = urlObj.searchParams.get("q");
-            if (q) {
-              targetUrl = q;
-            } else {
-              targetUrl = urlObj.toString();
-            }
-          } else if (firstResultHref.startsWith("/")) {
+          if (firstResultHref.startsWith("/")) {
             targetUrl = new URL(
               firstResultHref,
-              "https://www.google.com"
+              "https://html.duckduckgo.com"
             ).toString();
+          }
+          // DuckDuckGo redirector links: /l/?uddg=<encoded-url>
+          if (
+            targetUrl.includes("duckduckgo.com/l/?") ||
+            targetUrl.startsWith("/l/?")
+          ) {
+            const urlObj = new URL(targetUrl, "https://duckduckgo.com");
+            const uddg = urlObj.searchParams.get("uddg");
+            if (uddg) {
+              try {
+                targetUrl = decodeURIComponent(uddg);
+              } catch {
+                // leave as-is if decoding fails
+              }
+            }
           }
 
           await page.goto(targetUrl, { waitUntil: "domcontentloaded" });

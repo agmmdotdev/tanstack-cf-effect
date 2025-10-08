@@ -5,6 +5,9 @@
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/server.ts",
   "observability": {"enabled": true},
+   "browser": {
+    "binding": "MYBROWSER"
+  },
    "workflows": [
     {
       "name": "checkout-workflow",

@@ -834,7 +834,7 @@ export const Route = createFileRoute("/api/ddg")({
             const allResults = await fetchAllWithConcurrency<
               string,
               FetchResult
-            >(candidateUrls, worker, 2);
+            >(candidateUrls, worker, 8);
 
             if (allResults.length > 0) {
               // Clear and repopulate successes with all results

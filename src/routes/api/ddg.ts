@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { env } from "cloudflare:workers";
 
-import puppeteer from "@cloudflare/puppeteer";
+import puppeteer, { type Page } from "@cloudflare/puppeteer";
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import { GoogleGenAI } from "@google/genai";
@@ -18,18 +18,18 @@ type ReadabilityArticle = {
 const NAV_TIMEOUT_MS = 10000;
 const OP_TIMEOUT_MS = 10000;
 
-// Rotate realistic desktop user-agents with contact information for legitimate crawlers
+// Rotate realistic desktop user-agents to reduce bot detection risk
 const USER_AGENT_LIST: ReadonlyArray<string> = [
-  // Safari on macOS with contact info
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15 (+https://example.com/bot; contact@example.com)",
-  // Firefox on Windows with contact info
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0 (+https://example.com/bot; contact@example.com)",
-  // Chrome on Windows with contact info
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.88 Safari/537.36 (+https://example.com/bot; contact@example.com)",
-  // Chrome on macOS with contact info
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.88 Safari/537.36 (+https://example.com/bot; contact@example.com)",
-  // Edge on Windows with contact info
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.88 Safari/537.36 Edg/127.0.2651.74 (+https://example.com/bot; contact@example.com)",
+  // Safari on macOS
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
+  // Firefox on Windows
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+  // Chrome on Windows
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.88 Safari/537.36",
+  // Chrome on macOS
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.88 Safari/537.36",
+  // Edge on Windows
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.88 Safari/537.36 Edg/127.0.2651.74",
 ];
 
 function pickRandom<T>(items: ReadonlyArray<T>): T {
@@ -43,51 +43,6 @@ function randomInt(min: number, max: number): number {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Rate limiting with exponential backoff and jitter
-class RateLimiter {
-  private lastRequestTime = 0;
-  private readonly minDelay: number;
-  private readonly maxDelay: number;
-  private readonly baseDelay: number;
-
-  constructor(minDelay = 1000, maxDelay = 10000, baseDelay = 1000) {
-    this.minDelay = minDelay;
-    this.maxDelay = maxDelay;
-    this.baseDelay = baseDelay;
-  }
-
-  async waitIfNeeded(): Promise<void> {
-    const now = Date.now();
-    const timeSinceLastRequest = now - this.lastRequestTime;
-
-    // Add jitter to avoid synchronized requests
-    const jitter = randomInt(0, 500);
-    const delay = Math.max(this.minDelay, this.baseDelay + jitter);
-
-    if (timeSinceLastRequest < delay) {
-      const waitTime = delay - timeSinceLastRequest;
-      console.log(`[rate_limit] waiting ${waitTime}ms to respect rate limits`);
-      await sleep(waitTime);
-    }
-
-    this.lastRequestTime = Date.now();
-  }
-
-  async backoff(attempt: number): Promise<void> {
-    const exponentialDelay = Math.min(
-      this.baseDelay * Math.pow(2, attempt),
-      this.maxDelay
-    );
-    const jitter = randomInt(0, Math.floor(exponentialDelay * 0.1));
-    const totalDelay = exponentialDelay + jitter;
-
-    console.log(
-      `[rate_limit] exponential backoff attempt ${attempt}, waiting ${totalDelay}ms`
-    );
-    await sleep(totalDelay);
-  }
 }
 
 const LOCALES: ReadonlyArray<string> = ["en-US", "en-GB", "en-CA"];
@@ -115,7 +70,7 @@ function buildAcceptLanguage(locale: string): string {
 }
 
 async function applyPageStealth(
-  page: import("@cloudflare/puppeteer").Page,
+  page: Page,
   opts: {
     userAgent: string;
     locale: string;
@@ -123,130 +78,170 @@ async function applyPageStealth(
     viewport: ViewportChoice;
   }
 ): Promise<void> {
-  // Enable cookie handling
-  await page.setCookie({
-    name: "__cf_bm",
-    value: "dummy_cf_bm_value",
-    domain: ".cloudflare.com",
-    path: "/",
-    httpOnly: true,
-    secure: true,
-    sameSite: "Lax",
-  });
   await page.setUserAgent(opts.userAgent);
   await page.setViewport(opts.viewport);
   await page.emulateTimezone(opts.timezone);
+
+  // Set realistic cookies to appear as a returning user
+  const url = page.url();
+  if (url && url !== "about:blank") {
+    try {
+      const domain = new URL(url).hostname;
+      await page.setCookie(
+        {
+          name: "session_id",
+          value: Math.random().toString(36).substring(7),
+          domain: domain,
+          path: "/",
+          httpOnly: true,
+          secure: true,
+        },
+        {
+          name: "user_pref",
+          value: "v1",
+          domain: domain,
+          path: "/",
+        }
+      );
+    } catch {
+      // Ignore cookie setting errors
+    }
+  }
   await page.setExtraHTTPHeaders({
     "Accept-Language": buildAcceptLanguage(opts.locale),
     Accept:
-      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Accept-Charset": "UTF-8",
-    "Cache-Control": "no-cache",
-    Pragma: "no-cache",
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Upgrade-Insecure-Requests": "1",
+    "Cache-Control": "max-age=0",
+    "sec-ch-ua": '"Chromium";v="127", "Not)A;Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
     "Sec-Fetch-Dest": "document",
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-Site": "none",
     "Sec-Fetch-User": "?1",
-    "Sec-Ch-Ua":
-      '"Not)A;Brand";v="8", "Chromium";v="127", "Google Chrome";v="127"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Upgrade-Insecure-Requests": "1",
-    DNT: "1",
   });
-  // Enhanced stealth techniques to avoid headless browser detection
+  // Enhanced JS-level fingerprint evasion
   await page.evaluateOnNewDocument(() => {
     try {
-      // Remove webdriver flag
-      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      // webdriver flag
+      Object.defineProperty(navigator, "webdriver", { get: () => false });
 
-      // Override plugins to look more realistic
+      // Remove automation indicators
+      Object.defineProperty(navigator, "webdriver", {
+        get: () => undefined,
+      });
+
+      // languages
+      const langs = [
+        (navigator.language || "en-US") as string,
+        (navigator.language?.split("-")[0] || "en") as string,
+      ];
+      Object.defineProperty(navigator, "languages", { get: () => langs });
+
+      // More realistic plugins
       Object.defineProperty(navigator, "plugins", {
-        get: () => [
-          {
-            0: {
-              type: "application/x-google-chrome-pdf",
-              suffixes: "pdf",
-              description: "Portable Document Format",
-            },
-            description: "Portable Document Format",
-            filename: "internal-pdf-viewer",
-            length: 1,
-            name: "Chrome PDF Plugin",
-          },
-          {
-            0: { type: "application/pdf", suffixes: "pdf", description: "" },
-            description: "",
-            filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai",
-            length: 1,
-            name: "Chrome PDF Viewer",
-          },
-        ],
+        get: () => ({
+          length: 3,
+          0: { name: "Chrome PDF Plugin" },
+          1: { name: "Chrome PDF Viewer" },
+          2: { name: "Native Client" },
+        }),
       });
 
-      // Override languages
-      Object.defineProperty(navigator, "languages", {
-        get: () => ["en-US", "en"],
-      });
+      // chrome runtime shim
+      // @ts-ignore
+      (window as unknown as { chrome?: Record<string, unknown> }).chrome = {
+        runtime: {},
+        loadTimes: () => {},
+        csi: () => {},
+      };
 
-      // Override permissions
+      // Hide automation properties
+      const win = window as unknown as Record<string, unknown>;
+      delete win.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+      delete win.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+      delete win.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+
+      // Mock permissions
       const originalQuery = window.navigator.permissions.query;
-      window.navigator.permissions.query = (parameters) =>
-        parameters.name === "notifications"
+      window.navigator.permissions.query = (
+        parameters: PermissionDescriptor
+      ) =>
+        parameters.name === ("notifications" as PermissionName)
           ? Promise.resolve({
-              state: Notification.permission,
-              name: "notifications",
+              name: parameters.name,
+              state: "prompt" as PermissionState,
               onchange: null,
               addEventListener: () => {},
               removeEventListener: () => {},
-              dispatchEvent: () => false,
-            } as PermissionStatus)
+              dispatchEvent: () => true,
+            } as unknown as PermissionStatus)
           : originalQuery(parameters);
 
-      // Override chrome runtime
-      // @ts-ignore
-      (window as unknown as { chrome?: { runtime?: object } }).chrome = {
-        runtime: {
-          onConnect: undefined,
-          onMessage: undefined,
-        },
-      };
-
-      // Override getParameter to avoid WebGL fingerprinting
-      const getParameter = WebGLRenderingContext.prototype.getParameter;
-      WebGLRenderingContext.prototype.getParameter = function (parameter) {
-        if (parameter === 37445) {
-          return "Intel Inc.";
-        }
-        if (parameter === 37446) {
-          return "Intel(R) Iris(TM) Graphics 6100";
-        }
-        return getParameter(parameter);
-      };
-
-      // Override canvas fingerprinting
-      const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
-      HTMLCanvasElement.prototype.toDataURL = function () {
-        const context = this.getContext("2d");
-        if (context) {
-          const imageData = context.getImageData(0, 0, this.width, this.height);
-          for (let i = 0; i < imageData.data.length; i += 4) {
-            imageData.data[i] =
-              imageData.data[i] + Math.floor(Math.random() * 10) - 5;
-            imageData.data[i + 1] =
-              imageData.data[i + 1] + Math.floor(Math.random() * 10) - 5;
-            imageData.data[i + 2] =
-              imageData.data[i + 2] + Math.floor(Math.random() * 10) - 5;
-          }
-          context.putImageData(imageData, 0, 0);
-        }
-        return originalToDataURL.call(this);
-      };
-    } catch (error) {
-      console.warn("Stealth injection failed:", error);
+      // Add realistic screen properties
+      Object.defineProperty(screen, "availWidth", { get: () => screen.width });
+      Object.defineProperty(screen, "availHeight", {
+        get: () => screen.height - 40,
+      });
+    } catch {
+      // ignore
     }
   });
+}
+
+async function simulateHumanBehavior(page: Page): Promise<void> {
+  try {
+    // Random scroll to simulate reading
+    await page.evaluate(() => {
+      const scrollAmount = Math.floor(Math.random() * 500) + 200;
+      window.scrollBy({
+        top: scrollAmount,
+        behavior: "smooth",
+      });
+    });
+    await sleep(randomInt(300, 800));
+
+    // Random mouse movement
+    const viewport = page.viewport();
+    if (viewport) {
+      const x = randomInt(100, viewport.width - 100);
+      const y = randomInt(100, viewport.height - 100);
+      await page.mouse.move(x, y, { steps: randomInt(10, 20) });
+    }
+
+    await sleep(randomInt(200, 500));
+  } catch {
+    // Ignore errors in behavior simulation
+  }
+}
+
+async function fetchAllWithConcurrency<TInput, TResult>(
+  inputs: ReadonlyArray<TInput>,
+  worker: (input: TInput) => Promise<TResult | null>,
+  concurrency: number
+): Promise<Array<TResult>> {
+  if (inputs.length === 0) return [];
+  let index = 0;
+  const results: Array<TResult> = [];
+  const runners: Array<Promise<void>> = [];
+
+  const runNext = async (): Promise<void> => {
+    while (index < inputs.length) {
+      const myIndex = index++;
+      const input = inputs[myIndex];
+      const out = await worker(input).catch(() => null);
+      if (out !== null) {
+        results.push(out);
+      }
+    }
+  };
+
+  for (let i = 0; i < Math.max(1, Math.min(concurrency, inputs.length)); i++) {
+    runners.push(runNext());
+  }
+  await Promise.all(runners);
+  return results;
 }
 
 async function firstNonNullWithConcurrency<TInput, TResult>(
@@ -334,84 +329,6 @@ function isCloudflareChallenge(html: string): boolean {
   return signals.some((re) => re.test(text));
 }
 
-// Check robots.txt before crawling
-async function checkRobotsTxt(
-  url: string,
-  userAgent: string
-): Promise<boolean> {
-  try {
-    const urlObj = new URL(url);
-    const robotsUrl = `${urlObj.protocol}//${urlObj.host}/robots.txt`;
-
-    console.log(`[robots] checking ${robotsUrl}`);
-
-    const response = await fetch(robotsUrl, {
-      headers: {
-        "User-Agent": userAgent,
-        Accept: "text/plain",
-      },
-    });
-
-    if (!response.ok) {
-      console.log(
-        `[robots] robots.txt not found or not accessible (${response.status})`
-      );
-      return true; // Allow crawling if robots.txt is not found
-    }
-
-    const robotsText = await response.text();
-    const lines = robotsText.split("\n");
-
-    let currentUserAgent = "";
-    let disallowedPaths: string[] = [];
-    let allowedPaths: string[] = [];
-
-    for (const line of lines) {
-      const trimmed = line.trim().toLowerCase();
-      if (trimmed.startsWith("user-agent:")) {
-        currentUserAgent = trimmed.substring(11).trim();
-      } else if (trimmed.startsWith("disallow:")) {
-        if (
-          currentUserAgent === "*" ||
-          currentUserAgent === userAgent.toLowerCase()
-        ) {
-          const path = trimmed.substring(9).trim();
-          if (path) {
-            disallowedPaths.push(path);
-          }
-        }
-      } else if (trimmed.startsWith("allow:")) {
-        if (
-          currentUserAgent === "*" ||
-          currentUserAgent === userAgent.toLowerCase()
-        ) {
-          const path = trimmed.substring(6).trim();
-          if (path) {
-            allowedPaths.push(path);
-          }
-        }
-      }
-    }
-
-    // Check if the URL path is disallowed
-    const urlPath = urlObj.pathname;
-    for (const disallowedPath of disallowedPaths) {
-      if (disallowedPath === "/" || urlPath.startsWith(disallowedPath)) {
-        console.log(
-          `[robots] disallowed by robots.txt: ${urlPath} matches ${disallowedPath}`
-        );
-        return false;
-      }
-    }
-
-    console.log(`[robots] allowed to crawl ${urlPath}`);
-    return true;
-  } catch (error) {
-    console.warn(`[robots] error checking robots.txt:`, error);
-    return true; // Allow crawling if there's an error
-  }
-}
-
 async function firstNonNull<T>(
   promises: ReadonlyArray<Promise<T | null>>
 ): Promise<T | null> {
@@ -455,9 +372,6 @@ export const Route = createFileRoute("/api/ddg")({
         }
 
         let successes: Array<{ url: string; html: string }> = [];
-
-        // Initialize rate limiter for polite crawling
-        const rateLimiter = new RateLimiter(1500, 8000, 1500);
 
         let browser;
         try {
@@ -523,8 +437,8 @@ export const Route = createFileRoute("/api/ddg")({
             "https://html.duckduckgo.com/html/?" +
             new URLSearchParams({ q: normalizedQuery }).toString();
 
-          // Respect rate limits before navigation
-          await rateLimiter.waitIfNeeded();
+          // Small random delay before navigation
+          await sleep(randomInt(100, 400));
 
           let serpHtml: string;
           try {
@@ -655,10 +569,12 @@ export const Route = createFileRoute("/api/ddg")({
             preferredCandidates.length
           );
 
+          type FetchResult = { url: string; html: string };
+
           let html: string | null = null;
           let successUrl: string | null = null;
           {
-            const candidateUrls = preferredCandidates.slice(0, 20);
+            const candidateUrls = preferredCandidates.slice(0, 8);
             console.log(
               "[ddg] considering",
               candidateUrls.length,
@@ -672,18 +588,7 @@ export const Route = createFileRoute("/api/ddg")({
 
             const worker = async (
               candidateUrl: string
-            ): Promise<string | null> => {
-              // Check robots.txt before crawling
-              const isAllowed = await checkRobotsTxt(
-                candidateUrl,
-                chosenUserAgent
-              );
-              if (!isAllowed) {
-                console.log("[ddg] skipping due to robots.txt", candidateUrl);
-                skippedCount += 1;
-                return null;
-              }
-
+            ): Promise<FetchResult | null> => {
               let p;
               try {
                 p = await browser.newPage();
@@ -718,41 +623,14 @@ export const Route = createFileRoute("/api/ddg")({
                 await p.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
                 await p.setDefaultTimeout(OP_TIMEOUT_MS);
 
-                // Respect rate limits before visiting each candidate
-                await rateLimiter.waitIfNeeded();
+                await sleep(randomInt(120, 500));
 
                 try {
-                  const response = await p.goto(candidateUrl, {
+                  await p.goto(candidateUrl, {
                     waitUntil: "domcontentloaded",
                     timeout: NAV_TIMEOUT_MS,
                     referer: searchUrl,
                   });
-
-                  // Check for rate limiting or blocking
-                  if (response && response.status() >= 400) {
-                    const status = response.status();
-                    console.warn(`[ddg] HTTP ${status} for ${candidateUrl}`);
-
-                    if (status === 429) {
-                      // Rate limited - check for Retry-After header
-                      const retryAfter = response.headers()["retry-after"];
-                      if (retryAfter) {
-                        const delay = parseInt(retryAfter) * 1000;
-                        console.log(
-                          `[ddg] rate limited, waiting ${delay}ms as per Retry-After header`
-                        );
-                        await sleep(delay);
-                      } else {
-                        await rateLimiter.backoff(1);
-                      }
-                      throw new Error(`Rate limited: HTTP ${status}`);
-                    } else if (status === 403 || status === 503) {
-                      console.log(
-                        `[ddg] blocked or unavailable: HTTP ${status}`
-                      );
-                      throw new Error(`Blocked: HTTP ${status}`);
-                    }
-                  }
                 } catch (e) {
                   console.error(
                     "[ddg] candidate_navigation_failed",
@@ -775,6 +653,9 @@ export const Route = createFileRoute("/api/ddg")({
                     }),
                   sleep(300),
                 ]);
+
+                // Simulate human behavior to avoid bot detection
+                await simulateHumanBehavior(p);
 
                 const readContentWithRetry = async (
                   maxAttempts: number
@@ -892,7 +773,7 @@ export const Route = createFileRoute("/api/ddg")({
                       siteName: article.siteName,
                     });
                     successes.push({ url: candidateUrl, html: wrapped });
-                    return wrapped;
+                    return { url: candidateUrl, html: wrapped };
                   }
                   console.log(
                     "[ddg] readability_no_article",
@@ -908,7 +789,7 @@ export const Route = createFileRoute("/api/ddg")({
                     candidateHtml.length
                   );
                   successes.push({ url: candidateUrl, html: candidateHtml });
-                  return candidateHtml;
+                  return { url: candidateUrl, html: candidateHtml };
                 } catch (e) {
                   console.warn(
                     "[ddg] readability_parse_error",
@@ -925,7 +806,7 @@ export const Route = createFileRoute("/api/ddg")({
                     candidateHtml.length
                   );
                   successes.push({ url: candidateUrl, html: candidateHtml });
-                  return candidateHtml;
+                  return { url: candidateUrl, html: candidateHtml };
                 }
               } catch (e) {
                 skippedCount += 1;
@@ -949,22 +830,30 @@ export const Route = createFileRoute("/api/ddg")({
             };
 
             // Lower concurrency to look less bot-like
-            const first = await firstNonNullWithConcurrency<string, string>(
-              candidateUrls,
-              worker,
-              2
-            );
-            if (first) {
-              html = first;
+            // Fetch ALL pages instead of stopping at first success
+            const allResults = await fetchAllWithConcurrency<
+              string,
+              FetchResult
+            >(candidateUrls, worker, 2);
+
+            if (allResults.length > 0) {
+              // Clear and repopulate successes with all results
+              successes = allResults.map((r) => ({ url: r.url, html: r.html }));
+              // Use the first result's HTML for backward compatibility
+              html = allResults[0].html;
+              successUrl = allResults[0].url;
               console.log(
-                "[ddg] first_success:",
-                successUrl ?? "unknown",
+                "[ddg] fetched_all_pages:",
+                "total_successful=",
+                allResults.length,
                 "visited=",
                 visitedCount,
                 "skipped=",
                 skippedCount,
                 "successes=",
-                successCount
+                successCount,
+                "urls:",
+                allResults.map((r) => r.url)
               );
             } else {
               console.warn(

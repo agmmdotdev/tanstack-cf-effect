@@ -2,18 +2,9 @@ import { createFileRoute } from "@tanstack/react-router";
 import { env } from "cloudflare:workers";
 
 import puppeteer, { type Page } from "@cloudflare/puppeteer";
-import { Readability } from "@mozilla/readability";
-import { parseHTML } from "linkedom";
 import { GoogleGenAI } from "@google/genai";
 
-type ReadabilityArticle = {
-  title: string;
-  content: string;
-  byline?: string | null;
-  length?: number | null;
-  excerpt?: string | null;
-  siteName?: string | null;
-};
+// Removed DOM-based HTML parsing to keep CPU usage low on Cloudflare Workers
 
 const NAV_TIMEOUT_MS = 3000;
 const OP_TIMEOUT_MS = 3000;
@@ -350,20 +341,7 @@ function withTimeout<T>(
   });
 }
 
-function escapeHtmlAttribute(input: string): string {
-  return input
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function wrapAsHtmlDocument(article: ReadabilityArticle): string {
-  const safeTitle = escapeHtmlAttribute(article.title ?? "");
-  // content is already sanitized/cleaned by Readability; we still serve as text/html
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>${safeTitle}</title><style>body{margin:2rem auto;max-width:800px;line-height:1.6;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;padding:0 1rem} img,video,iframe{max-width:100%;height:auto} pre,code{white-space:pre-wrap;word-wrap:break-word}</style></head><body><article>${article.content}</article></body></html>`;
-}
+// Removed Readability-based wrapping to avoid heavy HTML parsing
 
 function isCloudflareChallenge(html: string): boolean {
   // Heuristics for Cloudflare interstitial/challenge pages
@@ -809,69 +787,17 @@ export const Route = createFileRoute("/api/ddg")({
                   return null;
                 }
 
-                // Server-side Readability using linkedom
-                try {
-                  const { document } = parseHTML(candidateHtml);
-                  const base = document.createElement("base");
-                  base.setAttribute("href", candidateUrl);
-                  const head = document.querySelector("head");
-                  if (head) head.insertBefore(base, head.firstChild);
-                  const article = new Readability(
-                    document as unknown as Document
-                  ).parse();
-                  if (article && article.content && article.title) {
-                    if (!successUrl) successUrl = candidateUrl;
-                    successCount += 1;
-                    console.log(
-                      "[ddg] success_readability",
-                      candidateUrl,
-                      "content_length:",
-                      article.content.length
-                    );
-                    const wrapped = wrapAsHtmlDocument({
-                      title: article.title,
-                      content: article.content,
-                      byline: article.byline ?? null,
-                      length: article.length,
-                      excerpt: article.excerpt,
-                      siteName: article.siteName,
-                    });
-                    successes.push({ url: candidateUrl, html: wrapped });
-                    return { url: candidateUrl, html: wrapped };
-                  }
-                  console.log(
-                    "[ddg] readability_no_article",
-                    candidateUrl,
-                    "falling back to raw HTML"
-                  );
-                  if (!successUrl) successUrl = candidateUrl;
-                  successCount += 1;
-                  console.log(
-                    "[ddg] success_raw",
-                    candidateUrl,
-                    "html_length:",
-                    candidateHtml.length
-                  );
-                  successes.push({ url: candidateUrl, html: candidateHtml });
-                  return { url: candidateUrl, html: candidateHtml };
-                } catch (e) {
-                  console.warn(
-                    "[ddg] readability_parse_error",
-                    candidateUrl,
-                    (e as Error).message ?? e,
-                    "using raw HTML"
-                  );
-                  if (!successUrl) successUrl = candidateUrl;
-                  successCount += 1;
-                  console.log(
-                    "[ddg] success_raw_fallback",
-                    candidateUrl,
-                    "html_length:",
-                    candidateHtml.length
-                  );
-                  successes.push({ url: candidateUrl, html: candidateHtml });
-                  return { url: candidateUrl, html: candidateHtml };
-                }
+                // Return raw HTML without DOM parsing for performance
+                if (!successUrl) successUrl = candidateUrl;
+                successCount += 1;
+                console.log(
+                  "[ddg] success_raw",
+                  candidateUrl,
+                  "html_length:",
+                  candidateHtml.length
+                );
+                successes.push({ url: candidateUrl, html: candidateHtml });
+                return { url: candidateUrl, html: candidateHtml };
               } catch (e) {
                 skippedCount += 1;
                 console.error(
@@ -953,48 +879,17 @@ export const Route = createFileRoute("/api/ddg")({
             const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
             const model = "gemini-flash-lite-latest";
 
-            // Build multi-source input (cap per source to keep token budget)
+            // Build multi-source input from raw HTML (no DOM parsing)
             const sourceTexts: Array<{ url: string; text: string }> = [];
             const perSourceLimit = 20_000; // chars per source
             const maxTotal = 120_000; // overall cap
             if (successes.length > 0) {
               for (const s of successes) {
-                const { document } = parseHTML(s.html);
-                const articleEl =
-                  document.querySelector("article") ?? document.body;
-                const title =
-                  document.querySelector("title")?.textContent ?? "";
-                const rawText = (
-                  articleEl?.textContent ??
-                  document.textContent ??
-                  ""
-                ).trim();
-                if (!rawText) {
-                  console.warn("[ddg] source_has_no_text", s.url);
-                  continue;
-                }
-                const snippet =
-                  `${title ? `Title: ${title}\n\n` : ""}${rawText}`.slice(
-                    0,
-                    perSourceLimit
-                  );
+                const snippet = s.html.slice(0, perSourceLimit);
                 sourceTexts.push({ url: s.url, text: snippet });
               }
             } else {
-              const { document } = parseHTML(html);
-              const articleEl =
-                document.querySelector("article") ?? document.body;
-              const title = document.querySelector("title")?.textContent ?? "";
-              const rawText = (
-                articleEl?.textContent ??
-                document.textContent ??
-                ""
-              ).trim();
-              const snippet =
-                `${title ? `Title: ${title}\n\n` : ""}${rawText}`.slice(
-                  0,
-                  perSourceLimit
-                );
+              const snippet = html.slice(0, perSourceLimit);
               sourceTexts.push({ url: successUrl ?? "unknown", text: snippet });
             }
 

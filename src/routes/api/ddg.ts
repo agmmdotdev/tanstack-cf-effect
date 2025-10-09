@@ -15,8 +15,8 @@ type ReadabilityArticle = {
   siteName?: string | null;
 };
 
-const NAV_TIMEOUT_MS = 5000;
-const OP_TIMEOUT_MS = 5000;
+const NAV_TIMEOUT_MS = 3000;
+const OP_TIMEOUT_MS = 3000;
 
 // Rotate realistic desktop user-agents to reduce bot detection risk
 const USER_AGENT_LIST: ReadonlyArray<string> = [

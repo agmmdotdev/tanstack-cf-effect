@@ -18,18 +18,18 @@ type ReadabilityArticle = {
 const NAV_TIMEOUT_MS = 10000;
 const OP_TIMEOUT_MS = 10000;
 
-// Rotate realistic desktop user-agents to reduce bot detection risk
+// Rotate realistic desktop user-agents with contact information for legitimate crawlers
 const USER_AGENT_LIST: ReadonlyArray<string> = [
-  // Safari on macOS
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
-  // Firefox on Windows
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
-  // Chrome on Windows
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.88 Safari/537.36",
-  // Chrome on macOS
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.88 Safari/537.36",
-  // Edge on Windows
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.88 Safari/537.36 Edg/127.0.2651.74",
+  // Safari on macOS with contact info
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15 (+https://example.com/bot; contact@example.com)",
+  // Firefox on Windows with contact info
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0 (+https://example.com/bot; contact@example.com)",
+  // Chrome on Windows with contact info
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.88 Safari/537.36 (+https://example.com/bot; contact@example.com)",
+  // Chrome on macOS with contact info
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.88 Safari/537.36 (+https://example.com/bot; contact@example.com)",
+  // Edge on Windows with contact info
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.88 Safari/537.36 Edg/127.0.2651.74 (+https://example.com/bot; contact@example.com)",
 ];
 
 function pickRandom<T>(items: ReadonlyArray<T>): T {
@@ -43,6 +43,51 @@ function randomInt(min: number, max: number): number {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Rate limiting with exponential backoff and jitter
+class RateLimiter {
+  private lastRequestTime = 0;
+  private readonly minDelay: number;
+  private readonly maxDelay: number;
+  private readonly baseDelay: number;
+
+  constructor(minDelay = 1000, maxDelay = 10000, baseDelay = 1000) {
+    this.minDelay = minDelay;
+    this.maxDelay = maxDelay;
+    this.baseDelay = baseDelay;
+  }
+
+  async waitIfNeeded(): Promise<void> {
+    const now = Date.now();
+    const timeSinceLastRequest = now - this.lastRequestTime;
+
+    // Add jitter to avoid synchronized requests
+    const jitter = randomInt(0, 500);
+    const delay = Math.max(this.minDelay, this.baseDelay + jitter);
+
+    if (timeSinceLastRequest < delay) {
+      const waitTime = delay - timeSinceLastRequest;
+      console.log(`[rate_limit] waiting ${waitTime}ms to respect rate limits`);
+      await sleep(waitTime);
+    }
+
+    this.lastRequestTime = Date.now();
+  }
+
+  async backoff(attempt: number): Promise<void> {
+    const exponentialDelay = Math.min(
+      this.baseDelay * Math.pow(2, attempt),
+      this.maxDelay
+    );
+    const jitter = randomInt(0, Math.floor(exponentialDelay * 0.1));
+    const totalDelay = exponentialDelay + jitter;
+
+    console.log(
+      `[rate_limit] exponential backoff attempt ${attempt}, waiting ${totalDelay}ms`
+    );
+    await sleep(totalDelay);
+  }
 }
 
 const LOCALES: ReadonlyArray<string> = ["en-US", "en-GB", "en-CA"];
@@ -78,36 +123,128 @@ async function applyPageStealth(
     viewport: ViewportChoice;
   }
 ): Promise<void> {
+  // Enable cookie handling
+  await page.setCookie({
+    name: "__cf_bm",
+    value: "dummy_cf_bm_value",
+    domain: ".cloudflare.com",
+    path: "/",
+    httpOnly: true,
+    secure: true,
+    sameSite: "Lax",
+  });
   await page.setUserAgent(opts.userAgent);
   await page.setViewport(opts.viewport);
   await page.emulateTimezone(opts.timezone);
   await page.setExtraHTTPHeaders({
     "Accept-Language": buildAcceptLanguage(opts.locale),
     Accept:
-      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Charset": "UTF-8",
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Sec-Ch-Ua":
+      '"Not)A;Brand";v="8", "Chromium";v="127", "Google Chrome";v="127"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
     "Upgrade-Insecure-Requests": "1",
+    DNT: "1",
   });
-  // Subtle JS-level fingerprints
+  // Enhanced stealth techniques to avoid headless browser detection
   await page.evaluateOnNewDocument(() => {
     try {
-      // webdriver flag
-      Object.defineProperty(navigator, "webdriver", { get: () => false });
-      // languages
-      const langs = [
-        (navigator.language || "en-US") as string,
-        (navigator.language?.split("-")[0] || "en") as string,
-      ];
-      Object.defineProperty(navigator, "languages", { get: () => langs });
-      // plugins length
-      // @ts-ignore
-      Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3] });
-      // chrome runtime shim
+      // Remove webdriver flag
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+
+      // Override plugins to look more realistic
+      Object.defineProperty(navigator, "plugins", {
+        get: () => [
+          {
+            0: {
+              type: "application/x-google-chrome-pdf",
+              suffixes: "pdf",
+              description: "Portable Document Format",
+            },
+            description: "Portable Document Format",
+            filename: "internal-pdf-viewer",
+            length: 1,
+            name: "Chrome PDF Plugin",
+          },
+          {
+            0: { type: "application/pdf", suffixes: "pdf", description: "" },
+            description: "",
+            filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai",
+            length: 1,
+            name: "Chrome PDF Viewer",
+          },
+        ],
+      });
+
+      // Override languages
+      Object.defineProperty(navigator, "languages", {
+        get: () => ["en-US", "en"],
+      });
+
+      // Override permissions
+      const originalQuery = window.navigator.permissions.query;
+      window.navigator.permissions.query = (parameters) =>
+        parameters.name === "notifications"
+          ? Promise.resolve({
+              state: Notification.permission,
+              name: "notifications",
+              onchange: null,
+              addEventListener: () => {},
+              removeEventListener: () => {},
+              dispatchEvent: () => false,
+            } as PermissionStatus)
+          : originalQuery(parameters);
+
+      // Override chrome runtime
       // @ts-ignore
       (window as unknown as { chrome?: { runtime?: object } }).chrome = {
-        runtime: {},
+        runtime: {
+          onConnect: undefined,
+          onMessage: undefined,
+        },
       };
-    } catch {
-      // ignore
+
+      // Override getParameter to avoid WebGL fingerprinting
+      const getParameter = WebGLRenderingContext.prototype.getParameter;
+      WebGLRenderingContext.prototype.getParameter = function (parameter) {
+        if (parameter === 37445) {
+          return "Intel Inc.";
+        }
+        if (parameter === 37446) {
+          return "Intel(R) Iris(TM) Graphics 6100";
+        }
+        return getParameter(parameter);
+      };
+
+      // Override canvas fingerprinting
+      const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+      HTMLCanvasElement.prototype.toDataURL = function () {
+        const context = this.getContext("2d");
+        if (context) {
+          const imageData = context.getImageData(0, 0, this.width, this.height);
+          for (let i = 0; i < imageData.data.length; i += 4) {
+            imageData.data[i] =
+              imageData.data[i] + Math.floor(Math.random() * 10) - 5;
+            imageData.data[i + 1] =
+              imageData.data[i + 1] + Math.floor(Math.random() * 10) - 5;
+            imageData.data[i + 2] =
+              imageData.data[i + 2] + Math.floor(Math.random() * 10) - 5;
+          }
+          context.putImageData(imageData, 0, 0);
+        }
+        return originalToDataURL.call(this);
+      };
+    } catch (error) {
+      console.warn("Stealth injection failed:", error);
     }
   });
 }
@@ -197,6 +334,84 @@ function isCloudflareChallenge(html: string): boolean {
   return signals.some((re) => re.test(text));
 }
 
+// Check robots.txt before crawling
+async function checkRobotsTxt(
+  url: string,
+  userAgent: string
+): Promise<boolean> {
+  try {
+    const urlObj = new URL(url);
+    const robotsUrl = `${urlObj.protocol}//${urlObj.host}/robots.txt`;
+
+    console.log(`[robots] checking ${robotsUrl}`);
+
+    const response = await fetch(robotsUrl, {
+      headers: {
+        "User-Agent": userAgent,
+        Accept: "text/plain",
+      },
+    });
+
+    if (!response.ok) {
+      console.log(
+        `[robots] robots.txt not found or not accessible (${response.status})`
+      );
+      return true; // Allow crawling if robots.txt is not found
+    }
+
+    const robotsText = await response.text();
+    const lines = robotsText.split("\n");
+
+    let currentUserAgent = "";
+    let disallowedPaths: string[] = [];
+    let allowedPaths: string[] = [];
+
+    for (const line of lines) {
+      const trimmed = line.trim().toLowerCase();
+      if (trimmed.startsWith("user-agent:")) {
+        currentUserAgent = trimmed.substring(11).trim();
+      } else if (trimmed.startsWith("disallow:")) {
+        if (
+          currentUserAgent === "*" ||
+          currentUserAgent === userAgent.toLowerCase()
+        ) {
+          const path = trimmed.substring(9).trim();
+          if (path) {
+            disallowedPaths.push(path);
+          }
+        }
+      } else if (trimmed.startsWith("allow:")) {
+        if (
+          currentUserAgent === "*" ||
+          currentUserAgent === userAgent.toLowerCase()
+        ) {
+          const path = trimmed.substring(6).trim();
+          if (path) {
+            allowedPaths.push(path);
+          }
+        }
+      }
+    }
+
+    // Check if the URL path is disallowed
+    const urlPath = urlObj.pathname;
+    for (const disallowedPath of disallowedPaths) {
+      if (disallowedPath === "/" || urlPath.startsWith(disallowedPath)) {
+        console.log(
+          `[robots] disallowed by robots.txt: ${urlPath} matches ${disallowedPath}`
+        );
+        return false;
+      }
+    }
+
+    console.log(`[robots] allowed to crawl ${urlPath}`);
+    return true;
+  } catch (error) {
+    console.warn(`[robots] error checking robots.txt:`, error);
+    return true; // Allow crawling if there's an error
+  }
+}
+
 async function firstNonNull<T>(
   promises: ReadonlyArray<Promise<T | null>>
 ): Promise<T | null> {
@@ -240,6 +455,9 @@ export const Route = createFileRoute("/api/ddg")({
         }
 
         let successes: Array<{ url: string; html: string }> = [];
+
+        // Initialize rate limiter for polite crawling
+        const rateLimiter = new RateLimiter(1500, 8000, 1500);
 
         let browser;
         try {
@@ -305,8 +523,8 @@ export const Route = createFileRoute("/api/ddg")({
             "https://html.duckduckgo.com/html/?" +
             new URLSearchParams({ q: normalizedQuery }).toString();
 
-          // Small random delay before navigation
-          await sleep(randomInt(100, 400));
+          // Respect rate limits before navigation
+          await rateLimiter.waitIfNeeded();
 
           let serpHtml: string;
           try {
@@ -440,7 +658,7 @@ export const Route = createFileRoute("/api/ddg")({
           let html: string | null = null;
           let successUrl: string | null = null;
           {
-            const candidateUrls = preferredCandidates.slice(0, 8);
+            const candidateUrls = preferredCandidates.slice(0, 20);
             console.log(
               "[ddg] considering",
               candidateUrls.length,
@@ -455,6 +673,17 @@ export const Route = createFileRoute("/api/ddg")({
             const worker = async (
               candidateUrl: string
             ): Promise<string | null> => {
+              // Check robots.txt before crawling
+              const isAllowed = await checkRobotsTxt(
+                candidateUrl,
+                chosenUserAgent
+              );
+              if (!isAllowed) {
+                console.log("[ddg] skipping due to robots.txt", candidateUrl);
+                skippedCount += 1;
+                return null;
+              }
+
               let p;
               try {
                 p = await browser.newPage();
@@ -489,14 +718,41 @@ export const Route = createFileRoute("/api/ddg")({
                 await p.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
                 await p.setDefaultTimeout(OP_TIMEOUT_MS);
 
-                await sleep(randomInt(120, 500));
+                // Respect rate limits before visiting each candidate
+                await rateLimiter.waitIfNeeded();
 
                 try {
-                  await p.goto(candidateUrl, {
+                  const response = await p.goto(candidateUrl, {
                     waitUntil: "domcontentloaded",
                     timeout: NAV_TIMEOUT_MS,
                     referer: searchUrl,
                   });
+
+                  // Check for rate limiting or blocking
+                  if (response && response.status() >= 400) {
+                    const status = response.status();
+                    console.warn(`[ddg] HTTP ${status} for ${candidateUrl}`);
+
+                    if (status === 429) {
+                      // Rate limited - check for Retry-After header
+                      const retryAfter = response.headers()["retry-after"];
+                      if (retryAfter) {
+                        const delay = parseInt(retryAfter) * 1000;
+                        console.log(
+                          `[ddg] rate limited, waiting ${delay}ms as per Retry-After header`
+                        );
+                        await sleep(delay);
+                      } else {
+                        await rateLimiter.backoff(1);
+                      }
+                      throw new Error(`Rate limited: HTTP ${status}`);
+                    } else if (status === 403 || status === 503) {
+                      console.log(
+                        `[ddg] blocked or unavailable: HTTP ${status}`
+                      );
+                      throw new Error(`Blocked: HTTP ${status}`);
+                    }
+                  }
                 } catch (e) {
                   console.error(
                     "[ddg] candidate_navigation_failed",

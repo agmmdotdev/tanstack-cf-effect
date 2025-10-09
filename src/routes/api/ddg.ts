@@ -67,7 +67,10 @@ export const Route = createFileRoute("/api/ddg")({
           await sleep(random(200, 500));
 
           // Search DuckDuckGo
-          const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+          const normalizedQuery = query; // Add normalization if needed
+          const searchUrl =
+            "https://html.duckduckgo.com/html/?" +
+            new URLSearchParams({ q: normalizedQuery }).toString();
           await page.goto(searchUrl, { waitUntil: "domcontentloaded" });
 
           // Extract search result links

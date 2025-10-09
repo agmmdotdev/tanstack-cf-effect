@@ -15,8 +15,8 @@ type ReadabilityArticle = {
   siteName?: string | null;
 };
 
-const NAV_TIMEOUT_MS = 10000;
-const OP_TIMEOUT_MS = 10000;
+const NAV_TIMEOUT_MS = 5000;
+const OP_TIMEOUT_MS = 5000;
 
 // Rotate realistic desktop user-agents to reduce bot detection risk
 const USER_AGENT_LIST: ReadonlyArray<string> = [
@@ -834,7 +834,7 @@ export const Route = createFileRoute("/api/ddg")({
             const allResults = await fetchAllWithConcurrency<
               string,
               FetchResult
-            >(candidateUrls, worker, 8);
+            >(candidateUrls, worker, 4);
 
             if (allResults.length > 0) {
               // Clear and repopulate successes with all results

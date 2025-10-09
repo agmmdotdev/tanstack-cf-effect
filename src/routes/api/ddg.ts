@@ -402,6 +402,16 @@ export const Route = createFileRoute("/api/ddg")({
           );
         }
 
+        // Serve from edge cache if available
+        try {
+          const cache = caches.default;
+          const cacheKey = new Request(request.url, request);
+          const cached = await cache.match(cacheKey);
+          if (cached) {
+            return cached;
+          }
+        } catch {}
+
         let successes: Array<{ url: string; html: string }> = [];
 
         let browser;
@@ -611,7 +621,7 @@ export const Route = createFileRoute("/api/ddg")({
             const rankedCandidates = preferredCandidates
               .map((url) => ({ url, score: scoreDomain(url) }))
               .sort((a, b) => b.score - a.score)
-              .slice(0, 8)
+              .slice(0, 5)
               .map((x) => x.url);
 
             const candidateUrls = rankedCandidates;
@@ -626,149 +636,78 @@ export const Route = createFileRoute("/api/ddg")({
             let skippedCount = 0;
             let successCount = 0;
 
+            // Fetch candidate pages via HTTP with streaming cutoff for speed
+            const fetchHtmlPartial = async (
+              candidateUrl: string,
+              maxBytes: number,
+              timeoutMs: number
+            ): Promise<string | null> => {
+              try {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), timeoutMs);
+                const resp = await fetch(candidateUrl, {
+                  method: "GET",
+                  redirect: "follow",
+                  signal: controller.signal,
+                  headers: {
+                    "Accept-Language": buildAcceptLanguage(chosenLocale),
+                    Accept:
+                      "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "User-Agent": chosenUserAgent,
+                    Referer: searchUrl,
+                    "Cache-Control": "no-cache",
+                  },
+                });
+                clearTimeout(timer);
+                if (!resp.ok || !resp.body) {
+                  return null;
+                }
+                const reader = resp.body.getReader();
+                const chunks: Array<Uint8Array> = [];
+                let received = 0;
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  if (value) {
+                    chunks.push(value);
+                    received += value.length;
+                    if (received >= maxBytes) {
+                      try {
+                        await reader.cancel();
+                      } catch {}
+                      break;
+                    }
+                  }
+                }
+                const total = chunks.reduce((acc, c) => acc + c.length, 0);
+                const merged = new Uint8Array(total);
+                let offset = 0;
+                for (const c of chunks) {
+                  merged.set(c, offset);
+                  offset += c.length;
+                }
+                const text = new TextDecoder("utf-8").decode(merged);
+                return text;
+              } catch {
+                return null;
+              }
+            };
+
             const worker = async (
               candidateUrl: string
             ): Promise<FetchResult | null> => {
-              let p;
               try {
-                p = await browser.newPage();
-              } catch (e) {
-                console.error(
-                  "[ddg] candidate_page_creation_failed",
-                  candidateUrl,
-                  (e as Error).message ?? e
-                );
-                return null;
-              }
-              try {
-                console.log("[ddg] visiting", candidateUrl);
                 visitedCount += 1;
-
-                try {
-                  await applyPageStealth(p, {
-                    userAgent: chosenUserAgent,
-                    locale: chosenLocale,
-                    timezone: chosenTimezone,
-                    viewport: chosenViewport,
-                  });
-                  // Block heavy resources for faster loading
-                  await setupResourceBlocking(p);
-                } catch (e) {
-                  console.error(
-                    "[ddg] candidate_stealth_setup_failed",
-                    candidateUrl,
-                    (e as Error).message ?? e
-                  );
-                  throw e;
+                console.log("[ddg] visiting", candidateUrl);
+                const candidateHtml = await fetchHtmlPartial(
+                  candidateUrl,
+                  120_000,
+                  4_000
+                );
+                if (!candidateHtml) {
+                  skippedCount += 1;
+                  return null;
                 }
-
-                await p.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
-                await p.setDefaultTimeout(OP_TIMEOUT_MS);
-
-                await sleep(randomInt(50, 150));
-
-                try {
-                  await p.goto(candidateUrl, {
-                    waitUntil: "domcontentloaded",
-                    timeout: NAV_TIMEOUT_MS,
-                    referer: searchUrl,
-                  });
-                } catch (e) {
-                  console.error(
-                    "[ddg] candidate_navigation_failed",
-                    candidateUrl,
-                    (e as Error).message ?? e
-                  );
-                  throw e;
-                }
-
-                // Some pages perform an immediate client-side redirect after DOMContentLoaded.
-                await Promise.race([
-                  p
-                    .waitForNavigation({
-                      waitUntil: "domcontentloaded",
-                      timeout: 1000,
-                    })
-                    .catch((e) => {
-                      console.log("[ddg] no_redirect_detected", candidateUrl);
-                      return null;
-                    }),
-                  sleep(100),
-                ]);
-
-                // Simulate human behavior to avoid bot detection
-                await simulateHumanBehavior(p);
-
-                const readContentWithRetry = async (
-                  maxAttempts: number
-                ): Promise<string> => {
-                  let lastError: Error | null = null;
-                  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                    try {
-                      return await withTimeout(
-                        p.content(),
-                        OP_TIMEOUT_MS,
-                        `candidate_content_attempt_${attempt}`
-                      );
-                    } catch (e) {
-                      const err = e as Error;
-                      lastError = err;
-                      if (
-                        !err.message.includes("Execution context was destroyed")
-                      ) {
-                        console.error(
-                          "[ddg] content_read_failed",
-                          candidateUrl,
-                          "attempt:",
-                          attempt,
-                          err.message
-                        );
-                        throw err;
-                      }
-                      console.warn(
-                        "[ddg] content_read_retry",
-                        candidateUrl,
-                        "attempt:",
-                        attempt,
-                        "context destroyed"
-                      );
-                      await sleep(100);
-                    }
-                  }
-                  if (lastError) {
-                    console.error(
-                      "[ddg] content_read_all_attempts_failed",
-                      candidateUrl,
-                      lastError.message
-                    );
-                    throw lastError;
-                  }
-                  return await withTimeout(
-                    p.content(),
-                    OP_TIMEOUT_MS,
-                    "candidate_content_final"
-                  );
-                };
-
-                let candidateHtml: string;
-                try {
-                  candidateHtml = await readContentWithRetry(3);
-                  console.log(
-                    "[ddg] content_read_success",
-                    candidateUrl,
-                    "length:",
-                    candidateHtml.length
-                  );
-                } catch (e) {
-                  console.error(
-                    "[ddg] content_read_final_failure",
-                    candidateUrl,
-                    (e as Error).message ?? e
-                  );
-                  throw e;
-                }
-
-                // Skip pages that are likely Cloudflare challenges or parked/ads
                 const looksLikeParkedOrAd =
                   candidateHtml.length < 400 ||
                   /adsense\/domains\/caf\.js/i.test(candidateHtml);
@@ -787,7 +726,6 @@ export const Route = createFileRoute("/api/ddg")({
                   return null;
                 }
 
-                // Return raw HTML without DOM parsing for performance
                 if (!successUrl) successUrl = candidateUrl;
                 successCount += 1;
                 console.log(
@@ -796,8 +734,12 @@ export const Route = createFileRoute("/api/ddg")({
                   "html_length:",
                   candidateHtml.length
                 );
-                successes.push({ url: candidateUrl, html: candidateHtml });
-                return { url: candidateUrl, html: candidateHtml };
+                const res: FetchResult = {
+                  url: candidateUrl,
+                  html: candidateHtml,
+                };
+                successes.push(res);
+                return res;
               } catch (e) {
                 skippedCount += 1;
                 console.error(
@@ -806,16 +748,6 @@ export const Route = createFileRoute("/api/ddg")({
                   (e as Error).message ?? e
                 );
                 return null;
-              } finally {
-                try {
-                  await withTimeout(p.close(), 2_000, "page_close");
-                } catch (e) {
-                  console.warn(
-                    "[ddg] candidate_page_close_error",
-                    candidateUrl,
-                    (e as Error).message ?? e
-                  );
-                }
               }
             };
 
@@ -952,9 +884,18 @@ export const Route = createFileRoute("/api/ddg")({
                     ? `\n\nSource: ${successUrl}`
                     : "";
               console.log("[ddg] returning_ai_summary");
-              return new Response(summary + sourcesBlock, {
-                headers: { "content-type": "text/plain; charset=utf-8" },
+              const textResponse = new Response(summary + sourcesBlock, {
+                headers: {
+                  "content-type": "text/plain; charset=utf-8",
+                  "Cache-Control": "public, s-maxage=21600",
+                },
               });
+              try {
+                const cache = caches.default;
+                const cacheKey = new Request(request.url, request);
+                await cache.put(cacheKey, textResponse.clone());
+              } catch {}
+              return textResponse;
             } else {
               console.warn("[ddg] ai_returned_empty_summary");
             }
@@ -969,11 +910,18 @@ export const Route = createFileRoute("/api/ddg")({
           }
 
           console.log("[ddg] returning_html_response", "length:", html.length);
-          return new Response(html, {
+          const htmlResponse = new Response(html, {
             headers: {
               "content-type": "text/html; charset=utf-8",
+              "Cache-Control": "public, s-maxage=21600",
             },
           });
+          try {
+            const cache = caches.default;
+            const cacheKey = new Request(request.url, request);
+            await cache.put(cacheKey, htmlResponse.clone());
+          } catch {}
+          return htmlResponse;
         } catch (e) {
           console.error(
             "[ddg] request_handler_error",

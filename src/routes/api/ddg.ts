@@ -488,20 +488,9 @@ export const Route = createFileRoute("/api/ddg")({
           await page.setDefaultTimeout(OP_TIMEOUT_MS);
 
           const normalizedQuery = query.replace(/\+/g, " ");
-          // Build Google SERP URL with locale hints and no personalization
-          const googleHl = chosenLocale;
-          const googleGl = (chosenLocale.split("-")[1] || "US").toLowerCase();
           const searchUrl =
-            "https://www.google.com/search?" +
-            new URLSearchParams({
-              q: normalizedQuery,
-              hl: googleHl,
-              gl: googleGl,
-              num: "10",
-              pws: "0",
-              gws_rd: "cr",
-              nfpr: "1",
-            }).toString();
+            "https://html.duckduckgo.com/html/?" +
+            new URLSearchParams({ q: normalizedQuery }).toString();
 
           // Small random delay before navigation
           await sleep(randomInt(100, 400));
@@ -511,7 +500,7 @@ export const Route = createFileRoute("/api/ddg")({
             await page.goto(searchUrl, {
               waitUntil: "domcontentloaded",
               timeout: NAV_TIMEOUT_MS,
-              referer: "https://www.google.com/",
+              referer: "https://duckduckgo.com/",
             });
             serpHtml = await withTimeout(
               page.content(),
@@ -541,26 +530,16 @@ export const Route = createFileRoute("/api/ddg")({
             rawResults = (await withTimeout(
               page.evaluate(() => {
                 function resolveHref(anchor: HTMLAnchorElement): string | null {
-                  return anchor.getAttribute("href") || anchor.href || null;
+                  return anchor.href || anchor.getAttribute("href") || null;
                 }
                 function isAd(anchor: HTMLAnchorElement): boolean {
-                  const href = anchor.getAttribute("href") || "";
-                  if (
-                    /googleadservices\.com/i.test(href) ||
-                    /[?&]adurl=/i.test(href)
-                  )
-                    return true;
-                  return (
-                    anchor.closest(
-                      "#tads, #tadsb, .uEierd, .commercial-unit-desktop-top, .commercial-unit-desktop-rhs"
-                    ) !== null
-                  );
+                  return anchor.closest(".result--ad") !== null;
                 }
-                // Prefer Google's main organic result anchors
                 const selectors: ReadonlyArray<string> = [
-                  'div#search a[href^="/url?"], div#search a[href^="http"]',
-                  'a[jsname][href^="/url?"]',
-                  'a[href^="/url?"], a[href^="http"]',
+                  "a.result__a",
+                  "a.result__url",
+                  "a.result__title",
+                  'a[rel="nofollow noopener"][href]',
                 ];
                 const seen = new Set<string>();
                 const results: Array<{ href: string; isAd: boolean }> = [];
@@ -571,14 +550,6 @@ export const Route = createFileRoute("/api/ddg")({
                   for (const a of anchors) {
                     const href = resolveHref(a);
                     if (!href) continue;
-                    // Skip internal google navigation links
-                    if (
-                      /^\/search\?/i.test(href) ||
-                      /^(?:https?:\/\/)?www\.google\./i.test(href)
-                    ) {
-                      // allow only redirector "/url?" which will be normalized later
-                      if (!/^\/url\?/i.test(href)) continue;
-                    }
                     if (seen.has(href)) continue;
                     seen.add(href);
                     results.push({ href, isAd: isAd(a) });
@@ -605,32 +576,27 @@ export const Route = createFileRoute("/api/ddg")({
             );
           }
 
-          const normalizeGoogleHref = (inputHref: string): string => {
+          const normalizeDuckHref = (inputHref: string): string => {
             let candidate = inputHref;
             if (candidate.startsWith("/")) {
               candidate = new URL(
                 candidate,
-                "https://www.google.com"
+                "https://html.duckduckgo.com"
               ).toString();
             }
-            try {
-              const urlObj = new URL(candidate);
-              // Normalize Google redirect links like /url?q=...
-              if (
-                urlObj.hostname.endsWith("google.com") &&
-                urlObj.pathname === "/url"
-              ) {
-                const q = urlObj.searchParams.get("q");
-                if (q) {
-                  try {
-                    return decodeURIComponent(q);
-                  } catch {
-                    return q;
-                  }
+            if (
+              candidate.includes("duckduckgo.com/l/?") ||
+              candidate.startsWith("/l/?")
+            ) {
+              const urlObj = new URL(candidate, "https://duckduckgo.com");
+              const uddg = urlObj.searchParams.get("uddg");
+              if (uddg) {
+                try {
+                  candidate = decodeURIComponent(uddg);
+                } catch {
+                  // leave as-is if decoding fails
                 }
               }
-            } catch {
-              // ignore parse errors
             }
             return candidate;
           };
@@ -639,20 +605,9 @@ export const Route = createFileRoute("/api/ddg")({
             new Set(
               rawResults
                 .filter((r) => !r.isAd)
-                .map((r) => normalizeGoogleHref(r.href))
+                .map((r) => normalizeDuckHref(r.href))
                 .filter((href) => /^https?:\/\//i.test(href))
-                // Exclude Google-owned hosts and ad domains after normalization
-                .filter((href) => {
-                  try {
-                    const h = new URL(href).hostname;
-                    return (
-                      !/(^|\.)google\./i.test(h) &&
-                      !/googleadservices\.com$/i.test(h)
-                    );
-                  } catch {
-                    return false;
-                  }
-                })
+                .filter((href) => !/google\.com\/adsense\/domains/i.test(href))
             )
           );
 

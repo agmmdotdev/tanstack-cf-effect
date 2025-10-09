@@ -629,11 +629,11 @@ export const Route = createFileRoute("/api/ddg")({
           let html: string | null = null;
           let successUrl: string | null = null;
           {
-            // Smart candidate selection: rank by domain quality and take top 4
+            // Smart candidate selection: rank by domain quality and take top 8
             const rankedCandidates = preferredCandidates
               .map((url) => ({ url, score: scoreDomain(url) }))
               .sort((a, b) => b.score - a.score)
-              .slice(0, 4)
+              .slice(0, 8)
               .map((x) => x.url);
 
             const candidateUrls = rankedCandidates;
@@ -893,12 +893,12 @@ export const Route = createFileRoute("/api/ddg")({
               }
             };
 
-            // Balanced concurrency: fetch all 4 pages with reasonable parallelism
+            // Balanced concurrency: fetch all 8 pages with reasonable parallelism
             // Optimized for speed while maintaining stealth
             const allResults = await fetchAllWithConcurrency<
               string,
               FetchResult
-            >(candidateUrls, worker, 3);
+            >(candidateUrls, worker, 4);
 
             if (allResults.length > 0) {
               // Clear and repopulate successes with all results

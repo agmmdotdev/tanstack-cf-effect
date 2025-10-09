@@ -69,6 +69,59 @@ function buildAcceptLanguage(locale: string): string {
   return `${locale},${base};q=0.9`;
 }
 
+function scoreDomain(url: string): number {
+  let score = 0;
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+
+    // Prefer known quality domains
+    if (/wikipedia|stackoverflow|github|medium|reddit|docs\./i.test(hostname)) {
+      score += 3;
+    }
+
+    // Penalize social media (often blocked or low quality)
+    if (/facebook|twitter|instagram|tiktok|pinterest/i.test(hostname)) {
+      score -= 5;
+    }
+
+    // Penalize ad/tracking domains
+    if (/doubleclick|adservice|adsense|googleadservices/i.test(hostname)) {
+      score -= 10;
+    }
+
+    // Prefer HTTPS
+    if (url.startsWith("https://")) {
+      score += 1;
+    }
+
+    // Prefer shorter URLs (usually more authoritative)
+    if (url.length < 100) {
+      score += 1;
+    }
+
+    return score;
+  } catch {
+    return -1; // Invalid URL
+  }
+}
+
+async function setupResourceBlocking(page: Page): Promise<void> {
+  try {
+    await page.setRequestInterception(true);
+    page.on("request", (request) => {
+      const resourceType = request.resourceType();
+      // Block heavy resources to speed up page loads
+      if (["image", "stylesheet", "font", "media"].includes(resourceType)) {
+        request.abort().catch(() => {});
+      } else {
+        request.continue().catch(() => {});
+      }
+    });
+  } catch (error) {
+    console.warn("[ddg] resource_blocking_setup_failed", error);
+  }
+}
+
 async function applyPageStealth(
   page: Page,
   opts: {
@@ -418,6 +471,8 @@ export const Route = createFileRoute("/api/ddg")({
               timezone: chosenTimezone,
               viewport: chosenViewport,
             });
+            // Block heavy resources for faster loading
+            await setupResourceBlocking(page);
           } catch (e) {
             console.error(
               "[ddg] stealth_setup_failed",
@@ -574,7 +629,14 @@ export const Route = createFileRoute("/api/ddg")({
           let html: string | null = null;
           let successUrl: string | null = null;
           {
-            const candidateUrls = preferredCandidates.slice(0, 8);
+            // Smart candidate selection: rank by domain quality and take top 4
+            const rankedCandidates = preferredCandidates
+              .map((url) => ({ url, score: scoreDomain(url) }))
+              .sort((a, b) => b.score - a.score)
+              .slice(0, 4)
+              .map((x) => x.url);
+
+            const candidateUrls = rankedCandidates;
             console.log(
               "[ddg] considering",
               candidateUrls.length,
@@ -611,6 +673,8 @@ export const Route = createFileRoute("/api/ddg")({
                     timezone: chosenTimezone,
                     viewport: chosenViewport,
                   });
+                  // Block heavy resources for faster loading
+                  await setupResourceBlocking(p);
                 } catch (e) {
                   console.error(
                     "[ddg] candidate_stealth_setup_failed",
@@ -829,12 +893,12 @@ export const Route = createFileRoute("/api/ddg")({
               }
             };
 
-            // Lower concurrency to look less bot-like
-            // Fetch ALL pages instead of stopping at first success
+            // Balanced concurrency: fetch all 4 pages with reasonable parallelism
+            // Optimized for speed while maintaining stealth
             const allResults = await fetchAllWithConcurrency<
               string,
               FetchResult
-            >(candidateUrls, worker, 4);
+            >(candidateUrls, worker, 3);
 
             if (allResults.length > 0) {
               // Clear and repopulate successes with all results

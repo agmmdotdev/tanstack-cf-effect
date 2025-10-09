@@ -55,6 +55,13 @@ const VIEWPORTS: ReadonlyArray<ViewportChoice> = [
   { width: 1920, height: 1080, deviceScaleFactor: 1 },
 ];
 
+// Maximum number of source pages to include in AI summarization
+const MAX_SUMMARY_SOURCES = 3;
+
+function isTrustedDocHost(hostname: string): boolean {
+  return /developers\.cloudflare\.com|docs\./i.test(hostname);
+}
+
 function buildAcceptLanguage(locale: string): string {
   const base = locale.split("-")[0];
   return `${locale},${base};q=0.9`;
@@ -68,6 +75,21 @@ function scoreDomain(url: string): number {
     // Prefer known quality domains
     if (/wikipedia|stackoverflow|github|medium|reddit|docs\./i.test(hostname)) {
       score += 3;
+    }
+
+    // Boost documentation domains (high relevance for technical queries)
+    if (/developers\.cloudflare\.com|docs\./i.test(hostname)) {
+      score += 3;
+    }
+
+    // Penalize marketing/plan pages which are often heavy and not content-rich
+    if (
+      /^www\.cloudflare\.com$/i.test(hostname) ||
+      /workers\.cloudflare\.com/i.test(hostname)
+    ) {
+      // demote marketing/pricing pages unless the path looks like docs
+      if (/plans|pricing|/i.test(url)) score -= 3;
+      else score -= 1;
     }
 
     // Penalize social media (often blocked or low quality)
@@ -102,10 +124,28 @@ async function setupResourceBlocking(page: Page): Promise<void> {
     page.on("request", (request) => {
       const resourceType = request.resourceType();
       // Block heavy resources to speed up page loads
-      if (["image", "stylesheet", "font", "media"].includes(resourceType)) {
-        request.abort().catch(() => {});
-      } else {
-        request.continue().catch(() => {});
+      // For known static documentation hosts, also block scripts/XHR to keep initial HTML small
+      try {
+        const reqUrl = request.url();
+        const hostname = new URL(reqUrl).hostname.toLowerCase();
+        const isDocHost = /developers\.cloudflare\.com|docs\./i.test(hostname);
+        const blockedForAll = ["image", "stylesheet", "font", "media"];
+        const blockedForDocs = [...blockedForAll, "script", "xhr"];
+        const shouldBlock = isDocHost
+          ? blockedForDocs.includes(resourceType)
+          : blockedForAll.includes(resourceType);
+        if (shouldBlock) {
+          request.abort().catch(() => {});
+        } else {
+          request.continue().catch(() => {});
+        }
+      } catch {
+        // conservatively block heavy resources if anything goes wrong parsing the URL
+        if (["image", "stylesheet", "font", "media"].includes(resourceType)) {
+          request.abort().catch(() => {});
+        } else {
+          request.continue().catch(() => {});
+        }
       }
     });
   } catch (error) {
@@ -288,6 +328,44 @@ async function fetchAllWithConcurrency<TInput, TResult>(
   return results;
 }
 
+/**
+ * Collect up to `maxResults` successful worker outputs, stopping early once
+ * we've gathered enough. This prevents launching every candidate when a
+ * few high-quality pages are sufficient for summarization.
+ */
+async function collectTopResults<TInput, TResult>(
+  inputs: ReadonlyArray<TInput>,
+  worker: (input: TInput) => Promise<TResult | null>,
+  concurrency: number,
+  maxResults: number
+): Promise<Array<TResult>> {
+  if (inputs.length === 0) return [];
+  let index = 0;
+  const results: Array<TResult> = [];
+  const runners: Array<Promise<void>> = [];
+
+  const runNext = async (): Promise<void> => {
+    while (index < inputs.length && results.length < maxResults) {
+      const myIndex = index++;
+      const input = inputs[myIndex];
+      try {
+        const out = await worker(input).catch(() => null);
+        if (out !== null) {
+          results.push(out);
+        }
+      } catch {
+        // ignore single worker errors
+      }
+    }
+  };
+
+  for (let i = 0; i < Math.max(1, Math.min(concurrency, inputs.length)); i++) {
+    runners.push(runNext());
+  }
+  await Promise.all(runners);
+  return results;
+}
+
 async function firstNonNullWithConcurrency<TInput, TResult>(
   inputs: ReadonlyArray<TInput>,
   worker: (input: TInput) => Promise<TResult | null>,
@@ -401,16 +479,6 @@ export const Route = createFileRoute("/api/ddg")({
             }
           );
         }
-
-        // Serve from edge cache if available
-        try {
-          const cache = caches.default;
-          const cacheKey = new Request(request.url, request);
-          const cached = await cache.match(cacheKey);
-          if (cached) {
-            return cached;
-          }
-        } catch {}
 
         let successes: Array<{ url: string; html: string }> = [];
 
@@ -621,7 +689,7 @@ export const Route = createFileRoute("/api/ddg")({
             const rankedCandidates = preferredCandidates
               .map((url) => ({ url, score: scoreDomain(url) }))
               .sort((a, b) => b.score - a.score)
-              .slice(0, 5)
+              .slice(0, 8)
               .map((x) => x.url);
 
             const candidateUrls = rankedCandidates;
@@ -636,78 +704,205 @@ export const Route = createFileRoute("/api/ddg")({
             let skippedCount = 0;
             let successCount = 0;
 
-            // Fetch candidate pages via HTTP with streaming cutoff for speed
-            const fetchHtmlPartial = async (
-              candidateUrl: string,
-              maxBytes: number,
-              timeoutMs: number
-            ): Promise<string | null> => {
-              try {
-                const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), timeoutMs);
-                const resp = await fetch(candidateUrl, {
-                  method: "GET",
-                  redirect: "follow",
-                  signal: controller.signal,
-                  headers: {
-                    "Accept-Language": buildAcceptLanguage(chosenLocale),
-                    Accept:
-                      "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "User-Agent": chosenUserAgent,
-                    Referer: searchUrl,
-                    "Cache-Control": "no-cache",
-                  },
-                });
-                clearTimeout(timer);
-                if (!resp.ok || !resp.body) {
-                  return null;
-                }
-                const reader = resp.body.getReader();
-                const chunks: Array<Uint8Array> = [];
-                let received = 0;
-                while (true) {
-                  const { done, value } = await reader.read();
-                  if (done) break;
-                  if (value) {
-                    chunks.push(value);
-                    received += value.length;
-                    if (received >= maxBytes) {
-                      try {
-                        await reader.cancel();
-                      } catch {}
-                      break;
-                    }
-                  }
-                }
-                const total = chunks.reduce((acc, c) => acc + c.length, 0);
-                const merged = new Uint8Array(total);
-                let offset = 0;
-                for (const c of chunks) {
-                  merged.set(c, offset);
-                  offset += c.length;
-                }
-                const text = new TextDecoder("utf-8").decode(merged);
-                return text;
-              } catch {
-                return null;
-              }
-            };
-
             const worker = async (
               candidateUrl: string
             ): Promise<FetchResult | null> => {
+              // Fast path: if this is a trusted documentation host, try a simple
+              // fetch first (no puppeteer page creation) to avoid launching
+              // additional renderer pages for large static docs.
               try {
-                visitedCount += 1;
-                console.log("[ddg] visiting", candidateUrl);
-                const candidateHtml = await fetchHtmlPartial(
-                  candidateUrl,
-                  120_000,
-                  4_000
-                );
-                if (!candidateHtml) {
-                  skippedCount += 1;
-                  return null;
+                const candidateHostname = new URL(
+                  candidateUrl
+                ).hostname.toLowerCase();
+                if (isTrustedDocHost(candidateHostname)) {
+                  try {
+                    const resp = await withTimeout(
+                      fetch(candidateUrl, {
+                        headers: {
+                          "User-Agent": chosenUserAgent,
+                          Referer: searchUrl,
+                        },
+                      }),
+                      NAV_TIMEOUT_MS,
+                      "fetch_doc_host"
+                    );
+                    if (resp && resp.ok) {
+                      const text = await withTimeout(
+                        resp.text(),
+                        OP_TIMEOUT_MS,
+                        "fetch_doc_text"
+                      );
+                      const snippet = String(text);
+                      // Quick heuristic skip for tiny/parked pages
+                      if (
+                        snippet.length < 400 ||
+                        /adsense\/domains\/caf\.js/i.test(snippet) ||
+                        isCloudflareChallenge(snippet)
+                      ) {
+                        console.log("[ddg] fetch_skipped", candidateUrl);
+                      } else {
+                        console.log(
+                          "[ddg] fetch_success",
+                          candidateUrl,
+                          "length:",
+                          snippet.length
+                        );
+                        successes.push({ url: candidateUrl, html: snippet });
+                        return { url: candidateUrl, html: snippet };
+                      }
+                    }
+                  } catch (e) {
+                    console.warn(
+                      "[ddg] fetch_doc_host_failed",
+                      candidateUrl,
+                      (e as Error).message ?? e
+                    );
+                    // fallthrough to puppeteer path
+                  }
                 }
+              } catch {
+                // ignore URL parsing issues and continue with puppeteer
+              }
+              let p;
+              try {
+                p = await browser.newPage();
+              } catch (e) {
+                console.error(
+                  "[ddg] candidate_page_creation_failed",
+                  candidateUrl,
+                  (e as Error).message ?? e
+                );
+                return null;
+              }
+              try {
+                console.log("[ddg] visiting", candidateUrl);
+                visitedCount += 1;
+
+                try {
+                  await applyPageStealth(p, {
+                    userAgent: chosenUserAgent,
+                    locale: chosenLocale,
+                    timezone: chosenTimezone,
+                    viewport: chosenViewport,
+                  });
+                  // Block heavy resources for faster loading
+                  await setupResourceBlocking(p);
+                } catch (e) {
+                  console.error(
+                    "[ddg] candidate_stealth_setup_failed",
+                    candidateUrl,
+                    (e as Error).message ?? e
+                  );
+                  throw e;
+                }
+
+                await p.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
+                await p.setDefaultTimeout(OP_TIMEOUT_MS);
+
+                await sleep(randomInt(50, 150));
+
+                try {
+                  await p.goto(candidateUrl, {
+                    waitUntil: "domcontentloaded",
+                    timeout: NAV_TIMEOUT_MS,
+                    referer: searchUrl,
+                  });
+                } catch (e) {
+                  console.error(
+                    "[ddg] candidate_navigation_failed",
+                    candidateUrl,
+                    (e as Error).message ?? e
+                  );
+                  throw e;
+                }
+
+                // Some pages perform an immediate client-side redirect after DOMContentLoaded.
+                await Promise.race([
+                  p
+                    .waitForNavigation({
+                      waitUntil: "domcontentloaded",
+                      timeout: 1000,
+                    })
+                    .catch((e) => {
+                      console.log("[ddg] no_redirect_detected", candidateUrl);
+                      return null;
+                    }),
+                  sleep(100),
+                ]);
+
+                // Simulate human behavior to avoid bot detection
+                await simulateHumanBehavior(p);
+
+                const readContentWithRetry = async (
+                  maxAttempts: number
+                ): Promise<string> => {
+                  let lastError: Error | null = null;
+                  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                    try {
+                      return await withTimeout(
+                        p.content(),
+                        OP_TIMEOUT_MS,
+                        `candidate_content_attempt_${attempt}`
+                      );
+                    } catch (e) {
+                      const err = e as Error;
+                      lastError = err;
+                      if (
+                        !err.message.includes("Execution context was destroyed")
+                      ) {
+                        console.error(
+                          "[ddg] content_read_failed",
+                          candidateUrl,
+                          "attempt:",
+                          attempt,
+                          err.message
+                        );
+                        throw err;
+                      }
+                      console.warn(
+                        "[ddg] content_read_retry",
+                        candidateUrl,
+                        "attempt:",
+                        attempt,
+                        "context destroyed"
+                      );
+                      await sleep(100);
+                    }
+                  }
+                  if (lastError) {
+                    console.error(
+                      "[ddg] content_read_all_attempts_failed",
+                      candidateUrl,
+                      lastError.message
+                    );
+                    throw lastError;
+                  }
+                  return await withTimeout(
+                    p.content(),
+                    OP_TIMEOUT_MS,
+                    "candidate_content_final"
+                  );
+                };
+
+                let candidateHtml: string;
+                try {
+                  candidateHtml = await readContentWithRetry(3);
+                  console.log(
+                    "[ddg] content_read_success",
+                    candidateUrl,
+                    "length:",
+                    candidateHtml.length
+                  );
+                } catch (e) {
+                  console.error(
+                    "[ddg] content_read_final_failure",
+                    candidateUrl,
+                    (e as Error).message ?? e
+                  );
+                  throw e;
+                }
+
+                // Skip pages that are likely Cloudflare challenges or parked/ads
                 const looksLikeParkedOrAd =
                   candidateHtml.length < 400 ||
                   /adsense\/domains\/caf\.js/i.test(candidateHtml);
@@ -726,6 +921,7 @@ export const Route = createFileRoute("/api/ddg")({
                   return null;
                 }
 
+                // Return raw HTML without DOM parsing for performance
                 if (!successUrl) successUrl = candidateUrl;
                 successCount += 1;
                 console.log(
@@ -734,12 +930,8 @@ export const Route = createFileRoute("/api/ddg")({
                   "html_length:",
                   candidateHtml.length
                 );
-                const res: FetchResult = {
-                  url: candidateUrl,
-                  html: candidateHtml,
-                };
-                successes.push(res);
-                return res;
+                successes.push({ url: candidateUrl, html: candidateHtml });
+                return { url: candidateUrl, html: candidateHtml };
               } catch (e) {
                 skippedCount += 1;
                 console.error(
@@ -748,15 +940,27 @@ export const Route = createFileRoute("/api/ddg")({
                   (e as Error).message ?? e
                 );
                 return null;
+              } finally {
+                try {
+                  await withTimeout(p.close(), 2_000, "page_close");
+                } catch (e) {
+                  console.warn(
+                    "[ddg] candidate_page_close_error",
+                    candidateUrl,
+                    (e as Error).message ?? e
+                  );
+                }
               }
             };
 
-            // Balanced concurrency: fetch all 8 pages with reasonable parallelism
-            // Optimized for speed while maintaining stealth
-            const allResults = await fetchAllWithConcurrency<
-              string,
-              FetchResult
-            >(candidateUrls, worker, 4);
+            // Balanced concurrency: fetch only up to MAX_SUMMARY_SOURCES pages
+            // to reduce latency and avoid fetching huge marketing pages
+            const allResults = await collectTopResults<string, FetchResult>(
+              candidateUrls,
+              worker,
+              4,
+              MAX_SUMMARY_SOURCES
+            );
 
             if (allResults.length > 0) {
               // Clear and repopulate successes with all results
@@ -884,18 +1088,9 @@ export const Route = createFileRoute("/api/ddg")({
                     ? `\n\nSource: ${successUrl}`
                     : "";
               console.log("[ddg] returning_ai_summary");
-              const textResponse = new Response(summary + sourcesBlock, {
-                headers: {
-                  "content-type": "text/plain; charset=utf-8",
-                  "Cache-Control": "public, s-maxage=21600",
-                },
+              return new Response(summary + sourcesBlock, {
+                headers: { "content-type": "text/plain; charset=utf-8" },
               });
-              try {
-                const cache = caches.default;
-                const cacheKey = new Request(request.url, request);
-                await cache.put(cacheKey, textResponse.clone());
-              } catch {}
-              return textResponse;
             } else {
               console.warn("[ddg] ai_returned_empty_summary");
             }
@@ -910,18 +1105,11 @@ export const Route = createFileRoute("/api/ddg")({
           }
 
           console.log("[ddg] returning_html_response", "length:", html.length);
-          const htmlResponse = new Response(html, {
+          return new Response(html, {
             headers: {
               "content-type": "text/html; charset=utf-8",
-              "Cache-Control": "public, s-maxage=21600",
             },
           });
-          try {
-            const cache = caches.default;
-            const cacheKey = new Request(request.url, request);
-            await cache.put(cacheKey, htmlResponse.clone());
-          } catch {}
-          return htmlResponse;
         } catch (e) {
           console.error(
             "[ddg] request_handler_error",
